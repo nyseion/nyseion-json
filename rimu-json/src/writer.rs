@@ -155,6 +155,7 @@ impl<'buf> JsonWriter<'buf> {
     }
   }
 
+  #[cfg(feature = "std")]
   /// A writer that hands every full buffer to `sink` instead of growing `buf`. `buf` gets at
   /// least `min_capacity` bytes; what is left in it at the end goes out with [`Self::flush_sink`].
   pub(crate) fn with_sink(
@@ -169,6 +170,7 @@ impl<'buf> JsonWriter<'buf> {
     writer
   }
 
+  #[cfg(feature = "std")]
   /// Hands everything still in the buffer to the sink.
   pub(crate) fn flush_sink(&mut self) {
     if let Some(sink) = self.sink.as_mut() {
