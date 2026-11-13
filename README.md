@@ -17,7 +17,31 @@ struct Order<'a> {
 
 let json: String = rimu_json::to_string(&order);   // same bytes as serde_json::to_string(&order)
 rimu_json::write_to(&order, &mut buf);             // appends to a reused Vec<u8>
+rimu_json::to_writer(&mut file, &order)?;          // streams to any io::Write
+let pretty = rimu_json::to_string_pretty(&order);  // same bytes as serde_json::to_string_pretty
+rimu_json::to_writer_pretty(&mut file, &order)?;   // streaming, pretty
+let value: serde_json::Value = /* ... */;
+rimu_json::to_string(&value);                      // `serde_json` feature
 ```
+
+## API
+
+| | in memory | streaming to `io::Write` (`std`) |
+|---|---|---|
+| compact | `to_vec`, `to_string`, `write_to(&value, &mut Vec)` | `to_writer` |
+| pretty (2 spaces) | `to_vec_pretty`, `to_string_pretty`, `write_pretty_to` | `to_writer_pretty` |
+| pretty, any indent | `pretty::reformat`, `pretty::Pretty` | `to_writer_with_indent` |
+
+- **Streaming** writes go out in chunks of about 16 KiB from a reused per-thread buffer, so memory
+  does not grow with the value, and no `BufWriter` is needed. I/O errors are returned once the
+  value is written (the rest of the output is discarded after the first one). Like serde_json,
+  the writer is not flushed.
+- **Pretty** output is compact output laid out by a streaming SIMD pass (`pretty::Pretty`), so it
+  works for every `JsonWrite` type, including hand-written ones, with no second code path. The
+  layout also accepts any valid JSON text (whitespace outside strings is dropped), so
+  `pretty::reformat` doubles as a fast JSON pretty-printer.
+- **`serde_json::Value`**, `Map<String, Value>` and `Number` implement `JsonWrite` with the
+  `serde_json` feature, with serde_json's output also under its `arbitrary_precision` feature.
 
 ## Why it is faster
 
@@ -32,6 +56,11 @@ rimu_json::write_to(&order, &mut buf);             // appends to a reused Vec<u8
 - **SIMD escaping while copying**, with the kernel chosen at run time: AVX2 (32 bytes a step),
   SSE2 (16, the x86-64 baseline) or SWAR (8, any target). Clean strings of up to 32 bytes skip
   the escaper entirely.
+- **Pretty printing at SIMD speed.** The layout classifies 64 bytes at a time as simdjson's first
+  stage does: bitmasks of quotes, backslashes, structural bytes and whitespace (SSE2), escaped
+  bytes from backslash runs with one addition, string interiors as the prefix XOR of the unescaped
+  quotes. Only structural bytes outside strings are acted on; everything between them is copied
+  in 16-byte moves.
 - **Numbers formatted in place**: integers from a two-digit table; floats through a fast path for
   whole values and values with at most two decimals (prices, ratings), otherwise `zmij`, the
   shortest round-trip algorithm `serde_json` uses.
@@ -71,10 +100,28 @@ treat ±10 % as noise. Every output was checked equal to `serde_json`'s.
 | orders (enum, rename, skip_if) ×10 | 2471 B | 645 | 654 | **1877** | – | 2.91× | 2.87× |
 | orders (enum, rename, skip_if) ×2000 | 538 KB | 632 | 637 | **1527** | – | 2.41× | 2.40× |
 
+### Pretty, streaming and `serde_json::Value`
+
+Same machine and caveats. MB/s, serde_json / rimu-json (sonic-rs where it applies); pretty MB/s
+are of the pretty output. For `io::Write`, serde_json goes through a `BufWriter` (as its docs
+advise) and rimu-json writes directly; both into `io::sink()`.
+
+| data | compact → Vec | compact → io::Write | pretty → Vec (serde / sonic / rimu) | pretty → io::Write |
+|---|---|---|---|---|
+| API items ×6000 (derive) | 552 / **1590** (2.9×) | 415 / **2332** (5.6×) | 641 / 575 / **784** (1.2×) | 530 / **711** (1.3×) |
+| orders ×2000 (derive) | 622 / **1710** (2.8×) | 657 / **1541** (2.3×) | 593 / 682 / **1100** (1.9×) | 594 / **1058** (1.8×) |
+| text posts ×5000 (derive) | 922 / **2503** (2.7×) | 910 / **2430** (2.7×) | 663 / 1213 / **768** (1.2×) | 618 / **742** (1.2×) |
+| API items as `serde_json::Value` | 83 / **95** (1.1×) | 62 / **79** (1.3×) | 97 / – / **121** (1.2×) | 84 / **88** (1.1×) |
+| orders as `serde_json::Value` | 58 / **79** (1.4×) | 68 / **80** (1.2×) | 99 / – / **116** (1.2×) | 102 / **115** (1.1×) |
+
+`Value` gains little: walking its tree of maps dominates, and its keys are only known at run
+time, so the derive's literals do not apply.
+
 ## Status and scope
 
-Serialization only, to `Vec<u8>`/`String`. No `io::Write` sink, pretty printing, or
-`serde_json::Value` support yet; no NEON kernel yet (aarch64 runs SWAR).
+Serialization only. No NEON kernel yet (aarch64 runs the portable kernels). `JsonWriter` is not
+`Send` (it can carry the streaming sink of a non-`Send` writer); it is a short-lived borrow
+inside `write_json`, so this rarely matters.
 
 ## Provenance and license
 

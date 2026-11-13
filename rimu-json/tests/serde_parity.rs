@@ -17,6 +17,16 @@ fn same<T: Serialize + JsonWrite + ?Sized>(value: &T) {
   let mut buf = b"x".to_vec();
   rimu_json::write_to(value, &mut buf);
   assert_eq!(&buf[1..], expected.as_bytes());
+  // Streaming to an `io::Write`.
+  let mut out = Vec::new();
+  rimu_json::to_writer(&mut out, value).unwrap();
+  assert_eq!(out, expected.as_bytes());
+  // Pretty, in memory and streaming.
+  let pretty = serde_json::to_string_pretty(value).unwrap();
+  assert_eq!(rimu_json::to_string_pretty(value), pretty);
+  let mut out = Vec::new();
+  rimu_json::to_writer_pretty(&mut out, value).unwrap();
+  assert_eq!(out, pretty.as_bytes());
 }
 
 struct Rng(u64);

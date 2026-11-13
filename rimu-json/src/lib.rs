@@ -35,6 +35,7 @@ extern crate std;
 
 mod escape;
 mod impls;
+pub mod pretty;
 mod writer;
 
 pub use escape::{Kernel, kernel};
@@ -58,6 +59,143 @@ pub fn to_vec<T: JsonWrite + ?Sized>(value: &T) -> Vec<u8> {
   write_to(value, &mut buf);
   buf
 }
+
+/// Appends `value` as pretty JSON to `buf`, laid out as `serde_json::to_vec_pretty` lays it out
+/// (two-space indent). See [`pretty`] for other indents.
+#[inline]
+pub fn write_pretty_to<T: JsonWrite + ?Sized>(value: &T, buf: &mut Vec<u8>) {
+  with_scratch(|scratch| {
+    write_to(value, scratch);
+    pretty::reformat(scratch, b"  ", buf);
+  });
+}
+
+/// `value` as pretty JSON bytes, as `serde_json::to_vec_pretty`.
+#[inline]
+pub fn to_vec_pretty<T: JsonWrite + ?Sized>(value: &T) -> Vec<u8> {
+  let mut buf = Vec::new();
+  write_pretty_to(value, &mut buf);
+  buf
+}
+
+/// `value` as a pretty JSON string, as `serde_json::to_string_pretty`.
+#[inline]
+pub fn to_string_pretty<T: JsonWrite + ?Sized>(value: &T) -> String {
+  // SAFETY: as `to_string`; the layout only inserts ASCII outside strings.
+  unsafe { String::from_utf8_unchecked(to_vec_pretty(value)) }
+}
+
+/// Runs `f` with an empty scratch vector: a reused per-thread one with `std` (a fresh one if
+/// that one is in use, as when a `JsonWrite` impl serializes something itself), else a new one.
+fn with_scratch<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+  #[cfg(feature = "std")]
+  {
+    std::thread_local!(static SCRATCH: core::cell::RefCell<Vec<u8>> = const { core::cell::RefCell::new(Vec::new()) });
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+      Ok(mut scratch) => {
+        scratch.clear();
+        let out = f(&mut scratch);
+        // Do not keep a huge buffer around after one huge value.
+        if scratch.capacity() > 1 << 20 {
+          *scratch = Vec::new();
+        }
+        out
+      }
+      Err(_) => f(&mut Vec::new()),
+    })
+  }
+  #[cfg(not(feature = "std"))]
+  {
+    f(&mut Vec::new())
+  }
+}
+
+#[cfg(feature = "std")]
+mod io_impl {
+  use crate::{JsonWrite, JsonWriter, pretty::Pretty, with_scratch, writer::Sink};
+  use alloc::vec::Vec;
+  use std::io;
+
+  /// Buffer size of the streaming writers: each `write_all` gets about this much.
+  const CHUNK: usize = 16 * 1024;
+
+  struct IoSink<W> {
+    writer: W,
+    error: Option<io::Error>,
+  }
+
+  impl<W: io::Write> Sink for IoSink<W> {
+    fn write(&mut self, bytes: &[u8]) {
+      if self.error.is_none()
+        && let Err(err) = self.writer.write_all(bytes)
+      {
+        self.error = Some(err);
+      }
+    }
+  }
+
+  struct PrettySink<'indent, W> {
+    pretty: Pretty<'indent>,
+    out: Vec<u8>,
+    io: IoSink<W>,
+  }
+
+  impl<W: io::Write> Sink for PrettySink<'_, W> {
+    fn write(&mut self, bytes: &[u8]) {
+      self.pretty.push(bytes, &mut self.out);
+      if self.out.len() >= CHUNK {
+        self.io.write(&self.out);
+        self.out.clear();
+      }
+    }
+  }
+
+  /// Writes `value` as JSON to `writer`, streaming: the output goes out in chunks of about 16 KiB
+  /// from a reused per-thread buffer, so memory does not grow with the size of the value. Like
+  /// `serde_json::to_writer`, it does not flush `writer`; wrapping it in a `BufWriter` is not
+  /// needed.
+  pub fn to_writer<W: io::Write, T: JsonWrite + ?Sized>(writer: W, value: &T) -> io::Result<()> {
+    let mut sink = IoSink { writer, error: None };
+    with_scratch(|buf| {
+      let mut w = JsonWriter::with_sink(buf, &mut sink, CHUNK);
+      value.write_json(&mut w);
+      w.flush_sink();
+    });
+    sink.error.map_or(Ok(()), Err)
+  }
+
+  /// [`to_writer`] with pretty output, as `serde_json::to_writer_pretty` (two-space indent).
+  pub fn to_writer_pretty<W: io::Write, T: JsonWrite + ?Sized>(
+    writer: W,
+    value: &T,
+  ) -> io::Result<()> {
+    to_writer_with_indent(writer, value, b"  ")
+  }
+
+  /// [`to_writer`] with pretty output and `indent` once per level.
+  pub fn to_writer_with_indent<W: io::Write, T: JsonWrite + ?Sized>(
+    writer: W,
+    value: &T,
+    indent: &[u8],
+  ) -> io::Result<()> {
+    let mut sink = PrettySink {
+      pretty: Pretty::new(indent),
+      out: Vec::with_capacity(CHUNK * 2),
+      io: IoSink { writer, error: None },
+    };
+    with_scratch(|buf| {
+      let mut w = JsonWriter::with_sink(buf, &mut sink, CHUNK);
+      value.write_json(&mut w);
+      w.flush_sink();
+    });
+    sink.pretty.finish(&mut sink.out);
+    sink.io.write(&sink.out);
+    sink.io.error.map_or(Ok(()), Err)
+  }
+}
+
+#[cfg(feature = "std")]
+pub use io_impl::{to_writer, to_writer_pretty, to_writer_with_indent};
 
 /// `value` as a JSON string.
 #[inline]

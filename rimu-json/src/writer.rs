@@ -27,11 +27,24 @@ pub struct JsonWriter<'buf> {
   cap: usize,
   len: usize,
   ptr: *mut u8,
+  /// Where full buffers go when the output streams (`to_writer`): instead of growing, the buffer
+  /// is handed to the sink, all but its last byte (so that `end_seq` can still replace a
+  /// trailing comma).
+  sink: Option<&'buf mut dyn Sink>,
 }
 
-// SAFETY: the writer is a unique borrow of the vector; `ptr` points into the vector it borrows.
-unsafe impl Send for JsonWriter<'_> {}
-// SAFETY: as above; `&JsonWriter` gives no access to the buffer.
+/// Receives the bytes of a streaming writer, buffer by buffer.
+pub(crate) trait Sink {
+  fn write(&mut self, bytes: &[u8]);
+}
+
+impl core::fmt::Debug for dyn Sink + '_ {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("Sink")
+  }
+}
+
+// SAFETY: `&JsonWriter` gives no access to the buffer or the sink.
 unsafe impl Sync for JsonWriter<'_> {}
 
 impl<'buf> JsonWriter<'buf> {
@@ -41,10 +54,34 @@ impl<'buf> JsonWriter<'buf> {
     let cap = buf.capacity();
     let len = buf.len();
     let ptr = buf.as_mut_ptr();
-    Self { buf, cap, len, ptr }
+    Self { buf, cap, len, ptr, sink: None }
   }
 
-  /// Bytes written so far, including what the vector held before.
+  /// A writer that hands every full buffer to `sink` instead of growing `buf`. `buf` gets at
+  /// least `min_capacity` bytes; what is left in it at the end goes out with [`Self::flush_sink`].
+  pub(crate) fn with_sink(
+    buf: &'buf mut Vec<u8>,
+    sink: &'buf mut dyn Sink,
+    min_capacity: usize,
+  ) -> Self {
+    buf.clear();
+    buf.reserve(min_capacity);
+    let mut writer = Self::new(buf);
+    writer.sink = Some(sink);
+    writer
+  }
+
+  /// Hands everything still in the buffer to the sink.
+  pub(crate) fn flush_sink(&mut self) {
+    if let Some(sink) = self.sink.as_mut() {
+      // SAFETY: the first `len` bytes were written.
+      sink.write(unsafe { core::slice::from_raw_parts(self.ptr, self.len) });
+      self.len = 0;
+    }
+  }
+
+  /// Bytes in the buffer: what it held before and what was written since (when streaming, since
+  /// the last buffer went out).
   #[inline]
   pub fn len(&self) -> usize {
     self.len
@@ -281,6 +318,20 @@ impl<'buf> JsonWriter<'buf> {
   #[cold]
   #[inline(never)]
   fn grow(&mut self, additional: usize) {
+    if let Some(sink) = self.sink.as_mut()
+      && self.len > 1
+    {
+      let keep = self.len - 1;
+      // SAFETY: the first `len` bytes were written; the last one moves to the front.
+      unsafe {
+        sink.write(core::slice::from_raw_parts(self.ptr, keep));
+        *self.ptr = *self.ptr.add(keep);
+      }
+      self.len = 1;
+      if self.cap - self.len >= additional {
+        return;
+      }
+    }
     // SAFETY: the first `len` bytes were written.
     unsafe {
       self.buf.set_len(self.len);

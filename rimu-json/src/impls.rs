@@ -331,3 +331,61 @@ tuple!(A B C D E F G H I);
 tuple!(A B C D E F G H I J);
 tuple!(A B C D E F G H I J K);
 tuple!(A B C D E F G H I J K L);
+
+#[cfg(feature = "serde_json")]
+mod serde_json_impls {
+  use super::{JsonWrite, map, seq};
+  use crate::JsonWriter;
+  use serde_json::{Map, Number, Value};
+
+  /// serde_json's `arbitrary_precision` feature stores a `Number` as its text (a `String`, 24
+  /// bytes) instead of an enum of `u64`, `i64` and `f64` (16 bytes). Its text is then what
+  /// serde_json writes, and `Display` gives it in both layouts.
+  const NUMBER_IS_TEXT: bool = size_of::<Number>() != 16;
+
+  impl JsonWrite for Number {
+    #[inline]
+    fn write_json(&self, w: &mut JsonWriter<'_>) {
+      if !NUMBER_IS_TEXT {
+        if let Some(value) = self.as_u64() {
+          return w.u64(value);
+        }
+        if let Some(value) = self.as_i64() {
+          return w.i64(value);
+        }
+        if let Some(value) = self.as_f64() {
+          return w.f64(value);
+        }
+      }
+      struct Raw<'a, 'b>(&'a mut JsonWriter<'b>);
+      impl core::fmt::Write for Raw<'_, '_> {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+          self.0.raw(text);
+          Ok(())
+        }
+      }
+      let _ = core::fmt::write(&mut Raw(w), format_args!("{self}"));
+    }
+  }
+
+  impl JsonWrite for Map<alloc::string::String, Value> {
+    #[inline]
+    fn write_json(&self, w: &mut JsonWriter<'_>) {
+      map(w, self.iter())
+    }
+  }
+
+  impl JsonWrite for Value {
+    #[inline]
+    fn write_json(&self, w: &mut JsonWriter<'_>) {
+      match self {
+        Value::Null => w.null(),
+        Value::Bool(value) => w.bool(*value),
+        Value::Number(value) => value.write_json(w),
+        Value::String(value) => w.str(value),
+        Value::Array(value) => seq(w, value.iter()),
+        Value::Object(value) => map(w, value.iter()),
+      }
+    }
+  }
+}

@@ -172,6 +172,76 @@ fn bench<T: Serialize + JsonWrite + ?Sized>(
   );
 }
 
+/// The new modes on one value: pretty in memory, streaming to an `io::Write`, both.
+fn bench_modes<T: Serialize + JsonWrite + ?Sized>(name: &str, value: &T, sonic: bool) {
+  let compact = serde_json::to_vec(value).unwrap();
+  let pretty = serde_json::to_vec_pretty(value).unwrap();
+  assert_eq!(rimu_json::to_vec_pretty(value), pretty, "pretty differs on {name}");
+  let mut v = Vec::with_capacity(pretty.len() * 2);
+  let mbs = |len: usize, ns: f64| len as f64 / ns * 1e3;
+  let serde_vec = time(|| {
+    v.clear();
+    serde_json::to_writer(&mut v, value).unwrap();
+    v.len()
+  });
+  let rimu_vec = time(|| {
+    v.clear();
+    rimu_json::write_to(value, &mut v);
+    v.len()
+  });
+  let serde_io = time(|| {
+    serde_json::to_writer(std::io::BufWriter::new(std::io::sink()), value).unwrap();
+    0
+  });
+  let rimu_io = time(|| {
+    rimu_json::to_writer(std::io::sink(), value).unwrap();
+    0
+  });
+  let serde_pretty = time(|| {
+    v.clear();
+    serde_json::to_writer_pretty(&mut v, value).unwrap();
+    v.len()
+  });
+  let sonic_pretty = sonic.then(|| {
+    assert_eq!(sonic_rs::to_vec_pretty(value).unwrap(), pretty, "sonic pretty differs on {name}");
+    time(|| {
+      v.clear();
+      sonic_rs::to_writer_pretty(&mut v, value).unwrap();
+      v.len()
+    })
+  });
+  let rimu_pretty = time(|| {
+    v.clear();
+    rimu_json::write_pretty_to(value, &mut v);
+    v.len()
+  });
+  let serde_pretty_io = time(|| {
+    serde_json::to_writer_pretty(std::io::BufWriter::new(std::io::sink()), value).unwrap();
+    0
+  });
+  let rimu_pretty_io = time(|| {
+    rimu_json::to_writer_pretty(std::io::sink(), value).unwrap();
+    0
+  });
+  let (c, p) = (compact.len(), pretty.len());
+  println!(
+    "| {name} | {:.0} / **{:.0}** ({:.1}×) | {:.0} / **{:.0}** ({:.1}×) | {:.0} / {} / **{:.0}** ({:.1}×) | {:.0} / **{:.0}** ({:.1}×) |",
+    mbs(c, serde_vec),
+    mbs(c, rimu_vec),
+    serde_vec / rimu_vec,
+    mbs(c, serde_io),
+    mbs(c, rimu_io),
+    serde_io / rimu_io,
+    mbs(p, serde_pretty),
+    sonic_pretty.map_or("–".into(), |ns| format!("{:.0}", mbs(p, ns))),
+    mbs(p, rimu_pretty),
+    serde_pretty / rimu_pretty,
+    mbs(p, serde_pretty_io),
+    mbs(p, rimu_pretty_io),
+    serde_pretty_io / rimu_pretty_io,
+  );
+}
+
 fn main() {
   let mut args = std::env::args().skip(1);
   let items: Vec<Item> =
@@ -243,4 +313,21 @@ fn main() {
   for n in [10, orders.len()] {
     bench(&format!("orders (enum, rename, skip_if) ×{n}"), &orders[..n], None);
   }
+
+  println!();
+  println!(
+    "MB/s, serde_json / rimu (sonic-rs where it applies). Pretty MB/s are of the pretty output. io::Write: serde_json through a BufWriter (as its docs advise), rimu-json directly; both over io::sink()."
+  );
+  println!();
+  println!(
+    "| data | compact → Vec | compact → io::Write | pretty → Vec (serde / sonic / rimu) | pretty → io::Write |"
+  );
+  println!("|---|---|---|---|---|");
+  bench_modes("API items ×6000 (derive)", &items[..], true);
+  bench_modes("orders ×2000 (derive)", &orders[..], true);
+  bench_modes("text posts ×5000 (derive)", &posts[..], true);
+  let items_value = serde_json::to_value(&items).unwrap();
+  bench_modes("API items as serde_json::Value", &items_value, false);
+  let orders_value = serde_json::to_value(&orders).unwrap();
+  bench_modes("orders as serde_json::Value", &orders_value, false);
 }

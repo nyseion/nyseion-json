@@ -8,13 +8,15 @@ rust-version.workspace = true
 
 [dependencies]
 rimu-json-derive = { path = "../rimu-json-derive", optional = true }
+serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
 zmij = { version = "1.0", default-features = false }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["std"] }
 
 [features]
 default = ["derive", "std"]
 derive = ["dep:rimu-json-derive"]
-std = []
+serde_json = ["dep:serde_json"]
+std = ["serde_json?/std"]

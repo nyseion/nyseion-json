@@ -5,7 +5,7 @@ version.workspace = true
 publish = false
 
 [dependencies]
-rimu-json = { path = "../rimu-json" }
+rimu-json = { path = "../rimu-json", features = ["serde_json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sonic-rs = "0.5"
