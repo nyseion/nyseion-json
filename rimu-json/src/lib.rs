@@ -42,7 +42,7 @@ pub use escape::{Kernel, kernel};
 pub use impls::{JsonKey, JsonWrite};
 #[cfg(feature = "derive")]
 pub use rimu_json_derive::JsonWrite;
-pub use writer::JsonWriter;
+pub use writer::{JsonBuffer, JsonWriter};
 
 use alloc::{string::String, vec::Vec};
 

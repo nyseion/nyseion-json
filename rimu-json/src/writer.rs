@@ -2,7 +2,7 @@
 
 use crate::escape;
 use alloc::vec::Vec;
-use core::ptr;
+use core::{marker::PhantomData, ptr};
 
 /// `00`..`99`, two bytes a number.
 const PAIRS: &[u8; 200] = b"0001020304050607080910111213141516171819\
@@ -23,7 +23,11 @@ const PAIRS: &[u8; 200] = b"0001020304050607080910111213141516171819\
 /// compiler would reload them after every piece.
 #[derive(Debug)]
 pub struct JsonWriter<'buf> {
-  buf: &'buf mut Vec<u8>,
+  /// The buffer, type-erased: reached only through `grow_fn` and `set_len_fn`, on the cold paths.
+  buf: *mut (),
+  grow_fn: unsafe fn(*mut (), usize, usize) -> (*mut u8, usize),
+  set_len_fn: unsafe fn(*mut (), usize),
+  _buf: PhantomData<&'buf mut ()>,
   cap: usize,
   len: usize,
   ptr: *mut u8,
@@ -31,6 +35,91 @@ pub struct JsonWriter<'buf> {
   /// is handed to the sink, all but its last byte (so that `end_seq` can still replace a
   /// trailing comma).
   sink: Option<&'buf mut dyn Sink>,
+}
+
+/// A byte buffer [`JsonWriter`] can append to: `Vec<u8>`, or any buffer of initialized bytes followed
+/// by spare capacity.
+///
+/// # Safety
+///
+/// [`as_mut_ptr`](Self::as_mut_ptr) points to [`capacity`](Self::capacity) bytes of which the
+/// first [`len`](Self::len) are initialized, and stays valid until the buffer is used through
+/// `&mut self` again; after `reserve(n)`, `capacity() - len() >= n`; `set_len(n)` with
+/// `n <= capacity()`, the first `n` bytes initialized, makes `n` the length.
+pub unsafe trait JsonBuffer {
+  /// The start of the buffer.
+  fn as_mut_ptr(&mut self) -> *mut u8;
+  /// Initialized bytes.
+  fn len(&self) -> usize;
+  /// Whether nothing is initialized.
+  fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+  /// Allocated bytes.
+  fn capacity(&self) -> usize;
+  /// Sets the length.
+  ///
+  /// # Safety
+  ///
+  /// `len <= capacity()` and the first `len` bytes are initialized.
+  unsafe fn set_len(&mut self, len: usize);
+  /// Makes room for at least `additional` more bytes; on allocation failure it does not return.
+  fn reserve(&mut self, additional: usize);
+}
+
+// SAFETY: forwards to `Vec`, which upholds every requirement.
+unsafe impl JsonBuffer for Vec<u8> {
+  #[inline]
+  fn as_mut_ptr(&mut self) -> *mut u8 {
+    Vec::as_mut_ptr(self)
+  }
+  #[inline]
+  fn len(&self) -> usize {
+    Vec::len(self)
+  }
+  #[inline]
+  fn capacity(&self) -> usize {
+    Vec::capacity(self)
+  }
+  #[inline]
+  unsafe fn set_len(&mut self, len: usize) {
+    // SAFETY: the caller's contract is `Vec::set_len`'s.
+    unsafe { Vec::set_len(self, len) }
+  }
+  #[inline]
+  fn reserve(&mut self, additional: usize) {
+    Vec::reserve(self, additional);
+  }
+}
+
+/// Sets the length of `buf`, then grows it by at least `additional`; returns the new pointer and
+/// capacity.
+///
+/// # Safety
+///
+/// `buf` is the `B` the writer borrows; its first `len` bytes are initialized and `len` is within
+/// its capacity.
+unsafe fn grow_erased<B: JsonBuffer>(
+  buf: *mut (),
+  len: usize,
+  additional: usize,
+) -> (*mut u8, usize) {
+  // SAFETY: the caller's contract.
+  let buf = unsafe { &mut *buf.cast::<B>() };
+  // SAFETY: as above.
+  unsafe { buf.set_len(len) };
+  buf.reserve(additional);
+  (buf.as_mut_ptr(), buf.capacity())
+}
+
+/// Sets the length of `buf`.
+///
+/// # Safety
+///
+/// As [`grow_erased`].
+unsafe fn set_len_erased<B: JsonBuffer>(buf: *mut (), len: usize) {
+  // SAFETY: the caller's contract.
+  unsafe { (*buf.cast::<B>()).set_len(len) }
 }
 
 /// Receives the bytes of a streaming writer, buffer by buffer.
@@ -50,11 +139,20 @@ unsafe impl Sync for JsonWriter<'_> {}
 impl<'buf> JsonWriter<'buf> {
   /// Appends to `buf`.
   #[inline]
-  pub fn new(buf: &'buf mut Vec<u8>) -> Self {
+  pub fn new<B: JsonBuffer>(buf: &'buf mut B) -> Self {
     let cap = buf.capacity();
     let len = buf.len();
     let ptr = buf.as_mut_ptr();
-    Self { buf, cap, len, ptr, sink: None }
+    Self {
+      buf: core::ptr::from_mut(buf).cast(),
+      grow_fn: grow_erased::<B>,
+      set_len_fn: set_len_erased::<B>,
+      _buf: PhantomData,
+      cap,
+      len,
+      ptr,
+      sink: None,
+    }
   }
 
   /// A writer that hands every full buffer to `sink` instead of growing `buf`. `buf` gets at
@@ -332,13 +430,10 @@ impl<'buf> JsonWriter<'buf> {
         return;
       }
     }
-    // SAFETY: the first `len` bytes were written.
-    unsafe {
-      self.buf.set_len(self.len);
-    }
-    self.buf.reserve(additional.max(self.cap));
-    self.cap = self.buf.capacity();
-    self.ptr = self.buf.as_mut_ptr();
+    // SAFETY: `buf` is the `B` the constructor erased; the first `len` bytes were written.
+    let (ptr, cap) = unsafe { (self.grow_fn)(self.buf, self.len, additional.max(self.cap)) };
+    self.ptr = ptr;
+    self.cap = cap;
   }
 
   #[inline(never)]
@@ -355,9 +450,10 @@ impl<'buf> JsonWriter<'buf> {
 impl Drop for JsonWriter<'_> {
   #[inline]
   fn drop(&mut self) {
-    // SAFETY: the first `len` bytes were written and `len <= cap`.
+    // SAFETY: `buf` is the `B` the constructor erased; the first `len` bytes were written and
+    // `len <= cap`.
     unsafe {
-      self.buf.set_len(self.len);
+      (self.set_len_fn)(self.buf, self.len);
     }
   }
 }
