@@ -2,6 +2,9 @@
 
 Fast JSON serialization for Rust, with output byte-identical to `serde_json`.
 
+Part of the rimu family of performance crates, alongside the [rimu-ws](https://github.com/vincentmele/rimu-ws)
+web server. Not affiliated with the [Rimu template language](https://rimu.dev) (`rimu` on crates.io).
+
 ```rust
 use rimu_json::JsonWrite;
 
