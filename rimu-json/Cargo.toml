@@ -1,0 +1,20 @@
+[package]
+name = "rimu-json"
+description = "Fast JSON serialization: a derive that writes keys as pre-escaped literals, SIMD string escaping chosen at run time, output identical to serde_json."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rimu-json-derive = { path = "../rimu-json-derive", optional = true }
+zmij = { version = "1.0", default-features = false }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+
+[features]
+default = ["derive", "std"]
+derive = ["dep:rimu-json-derive"]
+std = []

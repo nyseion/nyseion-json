@@ -1,0 +1,83 @@
+# rimu-json
+
+Fast JSON serialization for Rust, with output byte-identical to `serde_json`.
+
+```rust
+use rimu_json::JsonWrite;
+
+#[derive(serde::Serialize, JsonWrite)]
+#[serde(rename_all = "camelCase")]
+struct Order<'a> {
+  order_id: u64,
+  customer_name: &'a str,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  coupon: Option<String>,
+  total: f64,
+}
+
+let json: String = rimu_json::to_string(&order);   // same bytes as serde_json::to_string(&order)
+rimu_json::write_to(&order, &mut buf);             // appends to a reused Vec<u8>
+```
+
+## Why it is faster
+
+- **The derive writes literals, not calls.** Braces, keys with their quotes and colons, the
+  commas between fields and the quotes around `String`/`&str` fields are merged at compile time
+  into one literal per run, copied with fixed-size moves. A struct becomes alternating literal
+  copies and value writes. serde goes through `serialize_struct` / `serialize_field` / key
+  escaping for every field.
+- **One capacity check per piece.** `JsonWriter` keeps the vector's pointer, length and capacity
+  in its own fields so stores do not alias them, and checks room once per value for its worst
+  case.
+- **SIMD escaping while copying**, with the kernel chosen at run time: AVX2 (32 bytes a step),
+  SSE2 (16, the x86-64 baseline) or SWAR (8, any target). Clean strings of up to 32 bytes skip
+  the escaper entirely.
+- **Numbers formatted in place**: integers from a two-digit table; floats through a fast path for
+  whole values and values with at most two decimals (prices, ratings), otherwise `zmij`, the
+  shortest round-trip algorithm `serde_json` uses.
+
+## CPU targets
+
+One build serves every x86-64 CPU. Without `-C target-cpu=...`, the crate reads `cpuid` once
+(no `std` needed), caches the answer in an atomic, and runs the AVX2 or SSE2 kernel. With AVX2
+enabled at compile time it calls the AVX2 kernel directly. `rimu_json::kernel()` reports which one
+runs; `RIMU_JSON_NO_AVX2=1` forces SSE2 (with `std`) for measurement. Other targets use SWAR.
+
+## serde compatibility
+
+`#[derive(JsonWrite)]` reads `#[serde(...)]` (or `#[json(...)]`) attributes: `rename`,
+`rename_all`, `rename_all_fields`, `skip`, `skip_serializing`, `skip_serializing_if`,
+`transparent`; deserialization-only attributes are ignored. Enums are externally tagged, as serde's
+default. Attributes whose output it does not reproduce (`flatten`, `tag`, `content`, `untagged`,
+`serialize_with`, `with`, `into`, `remote`, `getter`, skipped variants) are **compile errors**, so
+the output never silently differs from `serde_json`. The test suite checks byte equality with
+`serde_json` across structs, enums, renames, every combination of skipped fields, std
+collections, 128-bit integers, 600 k floats and 9 k random strings, on each escape kernel.
+
+## Benchmarks
+
+`cargo run --release -p bench -- <api.json> <text-file>`. Single core, Ryzen 9 5900X, default
+x86-64 build (no `target-cpu`), runtime-selected AVX2. The machine was shared and loaded, so
+treat ±10 % as noise. Every output was checked equal to `serde_json`'s.
+
+| data | output | serde_json MB/s | sonic-rs MB/s | rimu derive MB/s | rimu hand MB/s | derive vs serde | derive vs sonic |
+|---|---|---|---|---|---|---|---|
+| API items ×10 | 1613 B | 609 | 599 | **2241** | 2404 | 3.68× | 3.74× |
+| API items ×6000 | 980 KB | 463 | 606 | **1978** | 1990 | 4.28× | 3.27× |
+| float points ×10 | 653 B | 504 | 498 | **775** | – | 1.54× | 1.56× |
+| float points ×20000 | 1289 KB | 512 | 488 | **708** | – | 1.38× | 1.45× |
+| text posts ×10 | 2513 B | 998 | 1771 | **3694** | – | 3.70× | 2.09× |
+| text posts ×5000 | 1218 KB | 926 | 1477 | **2135** | – | 2.30× | 1.45× |
+| orders (enum, rename, skip_if) ×10 | 2471 B | 645 | 654 | **1877** | – | 2.91× | 2.87× |
+| orders (enum, rename, skip_if) ×2000 | 538 KB | 632 | 637 | **1527** | – | 2.41× | 2.40× |
+
+## Status and scope
+
+Serialization only, to `Vec<u8>`/`String`. No `io::Write` sink, pretty printing, or
+`serde_json::Value` support yet; no NEON kernel yet (aarch64 runs SWAR).
+
+## Provenance and license
+
+`JsonWriter` is extracted from [rimu-ws](https://github.com/vincentmele/rimu-ws), a fork of
+[wtx](https://github.com/c410-f3r/wtx), where it served HttpArena's JSON profiles. Licensed under
+the [Mozilla Public License 2.0](LICENSE), as rimu-ws.

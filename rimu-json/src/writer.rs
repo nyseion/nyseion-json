@@ -1,0 +1,440 @@
+//! [`JsonWriter`]: JSON written straight into a `Vec<u8>`.
+
+use crate::escape;
+use alloc::vec::Vec;
+use core::ptr;
+
+/// `00`..`99`, two bytes a number.
+const PAIRS: &[u8; 200] = b"0001020304050607080910111213141516171819\
+2021222324252627282930313233343536373839\
+4041424344454647484950515253545556575859\
+6061626364656667686970717273747576777879\
+8081828384858687888990919293949596979899";
+
+/// Appends JSON to a `Vec<u8>`.
+///
+/// Every method checks the spare capacity once for its own worst case and then writes without
+/// further checks. Pieces that are already JSON (keys with their quotes and colon, punctuation)
+/// go in with [`raw`](Self::raw); strings are escaped while they are copied; numbers are
+/// formatted in place. The bytes are in the vector once the writer is dropped.
+///
+/// While it writes, the writer keeps the vector's pointer, length and capacity in its own fields:
+/// a byte stored through the vector's own pointer could alias the vector's fields, and the
+/// compiler would reload them after every piece.
+#[derive(Debug)]
+pub struct JsonWriter<'buf> {
+  buf: &'buf mut Vec<u8>,
+  cap: usize,
+  len: usize,
+  ptr: *mut u8,
+}
+
+// SAFETY: the writer is a unique borrow of the vector; `ptr` points into the vector it borrows.
+unsafe impl Send for JsonWriter<'_> {}
+// SAFETY: as above; `&JsonWriter` gives no access to the buffer.
+unsafe impl Sync for JsonWriter<'_> {}
+
+impl<'buf> JsonWriter<'buf> {
+  /// Appends to `buf`.
+  #[inline]
+  pub fn new(buf: &'buf mut Vec<u8>) -> Self {
+    let cap = buf.capacity();
+    let len = buf.len();
+    let ptr = buf.as_mut_ptr();
+    Self { buf, cap, len, ptr }
+  }
+
+  /// Bytes written so far, including what the vector held before.
+  #[inline]
+  pub fn len(&self) -> usize {
+    self.len
+  }
+
+  /// Whether nothing is in the vector.
+  #[inline]
+  pub fn is_empty(&self) -> bool {
+    self.len == 0
+  }
+
+  /// Reserves room for at least `additional` more bytes.
+  #[inline]
+  pub fn reserve(&mut self, additional: usize) {
+    self.ensure(additional);
+  }
+
+  /// Any [`JsonWrite`](crate::JsonWrite) value.
+  #[inline(always)]
+  pub fn value<T: crate::JsonWrite + ?Sized>(&mut self, value: &T) {
+    value.write_json(self);
+  }
+
+  /// `true` or `false`.
+  #[inline(always)]
+  pub fn bool(&mut self, value: bool) {
+    self.raw(if value { "true" } else { "false" });
+  }
+
+  /// `null`.
+  #[inline(always)]
+  pub fn null(&mut self) {
+    self.raw("null");
+  }
+
+  /// Ends an array or object whose elements were each written with a trailing comma: that comma
+  /// becomes `close`, and with no comma before it (an empty sequence) `close` is appended.
+  #[inline(always)]
+  pub fn end_seq(&mut self, close: u8) {
+    assert!(close.is_ascii(), "`end_seq` takes an ASCII byte");
+    if let Some(last) = self.len.checked_sub(1) {
+      // SAFETY: `last < len`, a byte that was written.
+      unsafe {
+        let at = self.ptr.add(last);
+        if *at == b',' {
+          *at = close;
+          return;
+        }
+      }
+    }
+    self.raw_bytes(&[close]);
+  }
+
+  /// A float in its shortest round-trip form; `null` when it is not finite, as `serde_json`.
+  ///
+  /// Whole values and values with at most two decimals below 10^13 (prices, ratings, quantities)
+  /// take a fast path: such a value is the double nearest to `cents / 100`, a decimal of at most
+  /// 15 significant digits, so that decimal is its shortest round-trip form and it is printed from
+  /// the integer `cents` instead of running the general algorithm.
+  #[inline]
+  pub fn f64(&mut self, value: f64) {
+    if !value.is_finite() {
+      return self.null();
+    }
+    self.ensure(32);
+    // SAFETY: `len <= cap`.
+    let dst = unsafe { self.ptr.add(self.len) };
+    let magnitude = value.abs();
+    if magnitude < 1e13 {
+      let int = magnitude as u64;
+      if int as f64 == magnitude {
+        // SAFETY: 32 bytes of spare capacity were ensured; the longest output is 16 bytes.
+        unsafe {
+          let neg = usize::from(value.is_sign_negative());
+          *dst = b'-';
+          let out = neg.wrapping_add(write_u64(int, dst.add(neg)));
+          ptr::copy_nonoverlapping(b".0".as_ptr(), dst.add(out), 2);
+          self.len = self.len.wrapping_add(out).wrapping_add(2);
+        }
+        return;
+      }
+      // `round` without `std`: below 10^15 < 2^52 the fraction of a double is exact.
+      let scaled = magnitude * 100.0;
+      let whole = scaled as u64;
+      let cents = whole + u64::from(scaled - whole as f64 >= 0.5);
+      if cents as f64 / 100.0 == magnitude {
+        // SAFETY: 32 bytes of spare capacity were ensured; the longest output is 17 bytes.
+        let written = unsafe { write_cents(value.is_sign_negative(), cents, dst) };
+        self.len = self.len.wrapping_add(written);
+        return;
+      }
+    }
+    let mut buffer = zmij::Buffer::new();
+    let text = buffer.format_finite(value).as_bytes();
+    // SAFETY: 32 bytes of spare capacity were ensured; `zmij` writes at most 24.
+    unsafe {
+      copy_small(text.as_ptr(), dst, text.len());
+    }
+    self.len = self.len.wrapping_add(text.len());
+  }
+
+  /// A float in its shortest round-trip form as an `f32`; `null` when it is not finite.
+  #[inline]
+  pub fn f32(&mut self, value: f32) {
+    if !value.is_finite() {
+      return self.null();
+    }
+    let mut buffer = zmij::Buffer::new();
+    self.raw(buffer.format_finite(value));
+  }
+
+  /// A signed integer.
+  #[inline(always)]
+  pub fn i64(&mut self, value: i64) {
+    self.ensure(20);
+    // SAFETY: 20 bytes of spare capacity were ensured. The sign is stored unconditionally and the
+    // first digit overwrites it when the value is not negative.
+    unsafe {
+      let dst = self.ptr.add(self.len);
+      let neg = usize::from(value < 0);
+      *dst = b'-';
+      let written = write_u64(value.unsigned_abs(), dst.add(neg));
+      self.len = self.len.wrapping_add(neg).wrapping_add(written);
+    }
+  }
+
+  /// An unsigned integer.
+  #[inline(always)]
+  pub fn u64(&mut self, value: u64) {
+    self.ensure(20);
+    // SAFETY: 20 bytes of spare capacity were ensured and `u64` has at most 20 digits.
+    unsafe {
+      let written = write_u64(value, self.ptr.add(self.len));
+      self.len = self.len.wrapping_add(written);
+    }
+  }
+
+  /// A 128-bit signed integer.
+  #[inline]
+  pub fn i128(&mut self, value: i128) {
+    if value < 0 {
+      self.raw("-");
+    }
+    self.u128(value.unsigned_abs());
+  }
+
+  /// A 128-bit unsigned integer.
+  #[inline]
+  pub fn u128(&mut self, value: u128) {
+    if let Ok(small) = u64::try_from(value) {
+      return self.u64(small);
+    }
+    let mut digits = [0u8; 39];
+    let mut at = digits.len();
+    let mut rest = value;
+    while rest > 0 {
+      at -= 1;
+      digits[at] = b'0' + (rest % 10) as u8;
+      rest /= 10;
+    }
+    self.raw_bytes(&digits[at..]);
+  }
+
+  /// Text that is already JSON: keys with their quotes and colon, punctuation, literals. It is not
+  /// checked.
+  #[inline(always)]
+  pub fn raw(&mut self, text: &str) {
+    self.raw_bytes(text.as_bytes());
+  }
+
+  /// [`Self::raw`] for bytes, kept private so that the output stays UTF-8.
+  #[inline(always)]
+  pub(crate) fn raw_bytes(&mut self, bytes: &[u8]) {
+    self.ensure(bytes.len());
+    // SAFETY: `bytes.len()` bytes of spare capacity were ensured.
+    unsafe {
+      let dst = self.ptr.add(self.len);
+      // A literal's length is a constant and the branch folds away.
+      if bytes.len() <= 32 {
+        copy_small(bytes.as_ptr(), dst, bytes.len());
+      } else {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+      }
+    }
+    self.len = self.len.wrapping_add(bytes.len());
+  }
+
+  /// A string, quoted and escaped.
+  #[inline(always)]
+  pub fn str(&mut self, value: &str) {
+    let src = value.as_bytes();
+    // Short strings with nothing to escape: one capacity check for the quotes and the contents.
+    if src.len() <= 32 && !escape::has_special_short(src) {
+      self.ensure(src.len().wrapping_add(2));
+      // SAFETY: capacity for the contents and two quotes was ensured above.
+      unsafe {
+        let dst = self.ptr.add(self.len);
+        *dst = b'"';
+        copy_small(src.as_ptr(), dst.add(1), src.len());
+        *dst.add(src.len().wrapping_add(1)) = b'"';
+      }
+      self.len = self.len.wrapping_add(src.len()).wrapping_add(2);
+      return;
+    }
+    self.raw("\"");
+    self.str_escaped(src);
+    self.raw("\"");
+  }
+
+  /// The escaped contents of a string, without quotes.
+  #[inline(always)]
+  pub fn str_contents(&mut self, value: &str) {
+    let src = value.as_bytes();
+    // Short strings with nothing to escape, the usual case: one check, one copy.
+    if src.len() <= 32 && !escape::has_special_short(src) {
+      self.ensure(src.len());
+      // SAFETY: capacity for `src.len()` bytes was ensured above.
+      unsafe {
+        copy_small(src.as_ptr(), self.ptr.add(self.len), src.len());
+      }
+      self.len = self.len.wrapping_add(src.len());
+      return;
+    }
+    self.str_escaped(src);
+  }
+
+  #[inline(always)]
+  fn ensure(&mut self, additional: usize) {
+    if self.cap.wrapping_sub(self.len) < additional {
+      self.grow(additional);
+    }
+  }
+
+  #[cold]
+  #[inline(never)]
+  fn grow(&mut self, additional: usize) {
+    // SAFETY: the first `len` bytes were written.
+    unsafe {
+      self.buf.set_len(self.len);
+    }
+    self.buf.reserve(additional.max(self.cap));
+    self.cap = self.buf.capacity();
+    self.ptr = self.buf.as_mut_ptr();
+  }
+
+  #[inline(never)]
+  fn str_escaped(&mut self, src: &[u8]) {
+    self.ensure(escape::bound(src.len()));
+    // SAFETY: `escape::bound` bytes of spare capacity were ensured.
+    unsafe {
+      let written = escape::escape(src, self.ptr.add(self.len));
+      self.len = self.len.wrapping_add(written);
+    }
+  }
+}
+
+impl Drop for JsonWriter<'_> {
+  #[inline]
+  fn drop(&mut self) {
+    // SAFETY: the first `len` bytes were written and `len <= cap`.
+    unsafe {
+      self.buf.set_len(self.len);
+    }
+  }
+}
+
+/// Writes `value` in decimal at `dst` and returns its length.
+///
+/// # Safety
+///
+/// `dst` is writable for 20 bytes.
+#[inline(always)]
+unsafe fn write_u64(value: u64, dst: *mut u8) -> usize {
+  // SAFETY: at most 4 bytes are written here, at most 20 in `write_u64_long`.
+  unsafe {
+    if value < 100 {
+      if value < 10 {
+        *dst = b'0'.wrapping_add(value as u8);
+        return 1;
+      }
+      write_pair(value as usize, dst);
+      return 2;
+    }
+    if value < 10_000 {
+      let high = value as usize / 100;
+      let low = value as usize % 100;
+      if high < 10 {
+        *dst = b'0'.wrapping_add(high as u8);
+        write_pair(low, dst.add(1));
+        return 3;
+      }
+      write_pair(high, dst);
+      write_pair(low, dst.add(2));
+      return 4;
+    }
+    write_u64_long(value, dst)
+  }
+}
+
+/// `value < 100` as two digits at `dst`.
+///
+/// # Safety
+///
+/// `dst` is writable for 2 bytes and `value < 100`.
+#[inline(always)]
+unsafe fn write_pair(value: usize, dst: *mut u8) {
+  // SAFETY: `2 * value + 2 <= 200`, inside `PAIRS`.
+  unsafe {
+    ptr::copy_nonoverlapping(PAIRS.as_ptr().add(value.wrapping_mul(2)), dst, 2);
+  }
+}
+
+/// [`write_u64`] for any value: two digits a step, right to left.
+///
+/// # Safety
+///
+/// `dst` is writable for 20 bytes.
+#[inline]
+unsafe fn write_u64_long(value: u64, dst: *mut u8) -> usize {
+  let digits = value.checked_ilog10().map_or(1, |el| el.wrapping_add(1)) as usize;
+  // SAFETY: `digits <= 20` bytes are written, right to left from `dst + digits`.
+  unsafe {
+    let mut end = dst.add(digits);
+    let mut rest = value;
+    while rest >= 100 {
+      let pair = (rest % 100) as usize;
+      rest /= 100;
+      end = end.sub(2);
+      write_pair(pair, end);
+    }
+    if rest >= 10 {
+      write_pair(rest as usize, end.sub(2));
+    } else {
+      *end.sub(1) = b'0'.wrapping_add(rest as u8);
+    }
+  }
+  digits
+}
+
+/// Writes `cents / 100` as `serde_json` would: `-`, the integer part, `.`, then the decimals with
+/// trailing zeros dropped but at least one. Returns the length.
+///
+/// # Safety
+///
+/// `dst` is writable for 17 bytes and `cents < 10^15`.
+#[inline]
+unsafe fn write_cents(negative: bool, cents: u64, dst: *mut u8) -> usize {
+  let frac = ((cents % 100) as usize).wrapping_mul(2);
+  // SAFETY: at most 1 + 13 + 1 + 2 bytes are written.
+  unsafe {
+    let mut out = usize::from(negative);
+    if negative {
+      *dst = b'-';
+    }
+    out = out.wrapping_add(write_u64(cents / 100, dst.add(out)));
+    *dst.add(out) = b'.';
+    ptr::copy_nonoverlapping(PAIRS.as_ptr().add(frac), dst.add(out.wrapping_add(1)), 2);
+    if *PAIRS.get_unchecked(frac.wrapping_add(1)) == b'0' {
+      out.wrapping_add(2)
+    } else {
+      out.wrapping_add(3)
+    }
+  }
+}
+
+/// Copies `len <= 32` bytes with two overlapping moves of a fixed size instead of a `memcpy`
+/// call.
+///
+/// # Safety
+///
+/// `src` is readable and `dst` writable for `len` bytes, and they do not overlap.
+#[inline(always)]
+pub(crate) unsafe fn copy_small(src: *const u8, dst: *mut u8, len: usize) {
+  // SAFETY: each pair of moves covers `[0, len)` with reads and writes inside it.
+  unsafe {
+    if len >= 16 {
+      ptr::copy_nonoverlapping(src, dst, 16);
+      ptr::copy_nonoverlapping(src.add(len - 16), dst.add(len - 16), 16);
+    } else if len >= 8 {
+      ptr::copy_nonoverlapping(src, dst, 8);
+      ptr::copy_nonoverlapping(src.add(len - 8), dst.add(len - 8), 8);
+    } else if len >= 4 {
+      ptr::copy_nonoverlapping(src, dst, 4);
+      ptr::copy_nonoverlapping(src.add(len - 4), dst.add(len - 4), 4);
+    } else {
+      let mut idx = 0;
+      while idx < len {
+        *dst.add(idx) = *src.add(idx);
+        idx += 1;
+      }
+    }
+  }
+}
