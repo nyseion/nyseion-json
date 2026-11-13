@@ -125,6 +125,11 @@ inside `write_json`, so this rarely matters.
 
 ## Provenance and license
 
-`JsonWriter` is extracted from [rimu-ws](https://github.com/vincentmele/rimu-ws), a fork of
-[wtx](https://github.com/c410-f3r/wtx), where it served HttpArena's JSON profiles. Licensed under
-the [Mozilla Public License 2.0](LICENSE), as rimu-ws.
+`JsonWriter` began in [rimu-ws](https://github.com/vincentmele/rimu-ws), where it served
+HttpArena's JSON profiles; it was written there by this crate's author, not taken from wtx.
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
+this crate by you, as defined in the Apache-2.0 license, shall be licensed as above, without any
+additional terms or conditions.
