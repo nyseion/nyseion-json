@@ -35,7 +35,7 @@ rimu_json::to_string(&value);                      // `serde_json` feature
 | pretty (2 spaces) | `to_vec_pretty`, `to_string_pretty`, `write_pretty_to` | `to_writer_pretty` |
 | pretty, any indent | `pretty::reformat`, `pretty::Pretty` | `to_writer_with_indent` |
 
-- **Streaming** writes go out in chunks of about 16 KiB from a reused per-thread buffer, so memory
+- **Streaming** writes go out in chunks of about 64 KiB from a reused per-thread buffer, so memory
   does not grow with the value, and no `BufWriter` is needed. I/O errors are returned once the
   value is written (the rest of the output is discarded after the first one). Like serde_json,
   the writer is not flushed.
@@ -122,7 +122,8 @@ time, so the derive's literals do not apply.
 
 ## Status and scope
 
-Serialization only. No NEON kernel yet (aarch64 runs the portable kernels). `JsonWriter` is not
+Serialization only. Kernels: AVX2 (run-time detected) and SSE2 on x86_64, NEON on aarch64
+(baseline, no run-time check), and a portable SWAR path everywhere else. `JsonWriter` is not
 `Send` (it can carry the streaming sink of a non-`Send` writer); it is a short-lived borrow
 inside `write_json`, so this rarely matters.
 

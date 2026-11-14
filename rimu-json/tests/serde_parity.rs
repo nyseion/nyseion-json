@@ -299,6 +299,89 @@ fn floats() {
 }
 
 #[test]
+fn wide_integers() {
+  let mut rng = Rng(19);
+  let mut values = vec![
+    0u128,
+    1,
+    9,
+    10,
+    99,
+    u64::MAX as u128,
+    u64::MAX as u128 + 1,
+    u128::MAX,
+    u128::MAX - 1,
+  ];
+  let mut pow: u128 = 1;
+  for _ in 0..38 {
+    pow *= 10;
+    values.extend([pow - 1, pow, pow + 1]);
+  }
+  for _ in 0..50_000 {
+    let high = rng.next() as u128;
+    let low = (rng.next() >> (rng.next() % 64)) as u128;
+    values.push(high << 64 | low);
+    values.push(low);
+  }
+  same(&values);
+  let mut signed = vec![0i128, -1, i128::MIN, i128::MAX, i64::MIN as i128, i64::MIN as i128 - 1];
+  let mut pow: i128 = 1;
+  for _ in 0..38 {
+    pow *= 10;
+    signed.extend([pow - 1, pow, pow + 1, -pow]);
+  }
+  for _ in 0..50_000 {
+    let high = rng.next() as i128;
+    let low = (rng.next() >> (rng.next() % 64)) as i128;
+    signed.push((high << 64 | low) as i128);
+    signed.push(-(low as i64) as i128);
+  }
+  same(&signed);
+}
+
+#[test]
+fn float_singles() {
+  let mut rng = Rng(23);
+  let mut values = vec![
+    0.0f32,
+    -0.0,
+    0.1,
+    0.5,
+    1.0,
+    1.5,
+    49.99,
+    0.005,
+    1.005,
+    2.675,
+    99999.99,
+    99999.995,
+    100000.0,
+    100000.01,
+    123456.78,
+    16777215.0,
+    16777216.0,
+    1e-45,
+    f32::MAX,
+    f32::MIN_POSITIVE,
+    f32::NAN,
+    f32::INFINITY,
+    f32::NEG_INFINITY,
+  ];
+  for _ in 0..200_000 {
+    values.push(f32::from_bits(rng.next() as u32));
+  }
+  for cents in 0..200_000u32 {
+    values.push(cents as f32 / 100.0);
+    values.push(-(cents as f32 / 100.0));
+  }
+  for whole in 0..70_000u32 {
+    values.push(whole as f32);
+    values.push(-(whole as f32));
+  }
+  same(&values);
+}
+
+#[test]
 fn strings() {
   let mut rng = Rng(7);
   let alphabet: Vec<char> =
@@ -320,6 +403,46 @@ fn strings() {
       same(&Newtype(text));
     }
   }
+}
+
+#[test]
+fn long_strings_across_escape_chunks() {
+  let mut rng = Rng(17);
+  let boundaries = [32 * 1024 - 1, 32 * 1024, 32 * 1024 + 1, 64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1];
+  for len in [32 * 1024 - 33, 32 * 1024, 32 * 1024 + 1, 64 * 1024, 64 * 1024 + 17, 100_000] {
+    // Clean except for specials placed right on the chunk boundaries.
+    let mut base = vec![b'a'; len];
+    for at in boundaries {
+      if at < len {
+        base[at] = b'"';
+      }
+    }
+    same(String::from_utf8(base).unwrap().as_str());
+    // A tenth of the bytes need escaping, all kinds.
+    let dirty: String = (0..len)
+      .map(|_| {
+        if rng.next() % 10 == 0 {
+          ['"', '\\', '\n', '\u{1}', 'é', '😀'][(rng.next() % 6) as usize]
+        } else {
+          'a'
+        }
+      })
+      .collect();
+    same(dirty.as_str());
+  }
+}
+
+#[test]
+fn to_vec_of_a_long_clean_string_does_not_reserve_six_times_the_output() {
+  let text = "x".repeat(1 << 20);
+  let out = rimu_json::to_vec(text.as_str());
+  assert_eq!(out.len(), text.len() + 2);
+  assert!(
+    out.capacity() <= out.len() * 2 + 64,
+    "capacity {} for {} written bytes",
+    out.capacity(),
+    out.len()
+  );
 }
 
 #[test]

@@ -36,8 +36,37 @@ pub(crate) static ESCAPE: [u8; 256] = {
   table
 };
 
-const ONES: u64 = 0x0101_0101_0101_0101;
-const HIGHS: u64 = 0x8080_8080_8080_8080;
+pub(crate) const ONES: u64 = 0x0101_0101_0101_0101;
+pub(crate) const HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// Multiplier that gathers one flag bit from every byte of a `u64` (each byte 0 or 1) into its
+/// top byte: `(flags * GATHER) >> 56` has bit `i` set when byte `i`'s flag was set. NEON has no
+/// `movemask`; this and a lane extract replace it, and the SWAR classifiers use the same
+/// identity to pack the per-byte hit bits of a word into a byte.
+#[cfg(any(
+  test,
+  target_arch = "aarch64",
+  not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+pub(crate) const GATHER: u64 = 0x0102_0408_1020_4080;
+
+/// The bit `i` of every byte of `v` (which is all-zero or all-one bytes, as a compare gives),
+/// packed into a `u16`.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub(crate) fn movemask(v: core::arch::aarch64::uint8x16_t) -> u16 {
+  use core::arch::aarch64::{vreinterpretq_u64_u8, vgetq_lane_u64};
+  let flags = |word: u64| {
+    let flags = word & ONES;
+    // Multiplication cannot overflow: the top byte is at most 0xff (bit 63) and the byte at
+    // most 0x7f for the others (the largest partial product above bit 55 is bit 55 + 7 = 62).
+    flags.wrapping_mul(GATHER) >> 56
+  };
+  // SAFETY: 0 and 1 are lanes of `v`.
+  let low = unsafe { flags(u64::from(vgetq_lane_u64(vreinterpretq_u64_u8(v), 0))) };
+  let high = unsafe { flags(u64::from(vgetq_lane_u64(vreinterpretq_u64_u8(v), 1))) };
+  low as u16 | (high as u16) << 8
+}
 
 /// The kernels [`escape`] can run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +75,8 @@ pub enum Kernel {
   Avx2,
   /// 16 bytes a step (any x86-64).
   Sse2,
+  /// 16 bytes a step (any aarch64: NEON is part of the baseline).
+  Neon,
   /// 8 bytes a step in a `u64` (any target).
   Swar,
 }
@@ -61,7 +92,11 @@ pub fn kernel() -> Kernel {
   {
     if x86::has_avx2() { Kernel::Avx2 } else { Kernel::Sse2 }
   }
-  #[cfg(not(target_arch = "x86_64"))]
+  #[cfg(target_arch = "aarch64")]
+  {
+    Kernel::Neon
+  }
+  #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
   {
     Kernel::Swar
   }
@@ -91,7 +126,11 @@ pub(crate) unsafe fn escape(src: &[u8], dst: *mut u8) -> usize {
     {
       if x86::has_avx2() { x86::escape_avx2(src, dst) } else { x86::escape_sse2(src, dst) }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+      neon::escape_neon(src, dst)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
       escape_tail(src, dst, 0, 0)
     }
@@ -113,6 +152,8 @@ pub fn escape_with(kernel: Kernel, src: &[u8], out: &mut alloc::vec::Vec<u8>) ->
       Kernel::Sse2 => x86::escape_sse2(src, dst),
       #[cfg(target_arch = "x86_64")]
       Kernel::Avx2 if x86::cpu_has_avx2() => x86::escape_avx2(src, dst),
+      #[cfg(target_arch = "aarch64")]
+      Kernel::Neon => neon::escape_neon(src, dst),
       _ => return None,
     }
   };
@@ -377,6 +418,59 @@ mod x86 {
   }
 }
 
+#[cfg(target_arch = "aarch64")]
+mod neon {
+  use super::{escape_byte, escape_tail, movemask};
+  use core::arch::aarch64::*;
+
+  /// # Safety
+  ///
+  /// As [`super::escape`]: NEON is part of the aarch64 baseline, so no run-time check is needed.
+  #[inline]
+  pub(super) unsafe fn escape_neon(src: &[u8], dst: *mut u8) -> usize {
+    // SAFETY: forwarded.
+    unsafe { escape_tail_neon(src, dst, 0, 0) }
+  }
+
+  /// The NEON loop from `idx`/`out`, then the shared tail.
+  ///
+  /// # Safety
+  ///
+  /// As `super::escape_tail`.
+  #[inline(always)]
+  unsafe fn escape_tail_neon(src: &[u8], dst: *mut u8, mut idx: usize, mut out: usize) -> usize {
+    let len = src.len();
+    // SAFETY: NEON is baseline on aarch64; loads stay inside `src`; stores within the caller's
+    // bound.
+    unsafe {
+      let quote = vdupq_n_u8(b'"');
+      let backslash = vdupq_n_u8(b'\\');
+      let control = vdupq_n_u8(0x1f);
+      while idx.wrapping_add(16) <= len {
+        let block = vld1q_u8(src.as_ptr().add(idx));
+        vst1q_u8(dst.add(out), block);
+        let hits = vorrq_u8(
+          vorrq_u8(vceqq_u8(block, quote), vceqq_u8(block, backslash)),
+          // unsigned `byte <= 0x1f`: min(byte, 0x1f) == byte
+          vceqq_u8(vminq_u8(block, control), block),
+        );
+        let mask = movemask(hits);
+        if mask == 0 {
+          idx = idx.wrapping_add(16);
+          out = out.wrapping_add(16);
+          continue;
+        }
+        let clean = mask.trailing_zeros() as usize;
+        idx = idx.wrapping_add(clean);
+        out = out.wrapping_add(clean);
+        out = out.wrapping_add(escape_byte(*src.get_unchecked(idx), dst.add(out)));
+        idx = idx.wrapping_add(1);
+      }
+      escape_tail(src, dst, idx, out)
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::{ESCAPE, Kernel, escape_with};
@@ -405,7 +499,7 @@ mod tests {
       state
     };
     let mut out = Vec::new();
-    let mut ran = [0usize; 3];
+    let mut ran = [0usize; 4];
     for len in 0..300 {
       for _ in 0..40 {
         let density = next() % 64;
@@ -416,7 +510,9 @@ mod tests {
           })
           .collect();
         let expected = reference(&src);
-        for (slot, kernel) in [Kernel::Avx2, Kernel::Sse2, Kernel::Swar].into_iter().enumerate() {
+        for (slot, kernel) in
+          [Kernel::Avx2, Kernel::Sse2, Kernel::Neon, Kernel::Swar].into_iter().enumerate()
+        {
           if escape_with(kernel, &src, &mut out).is_some() {
             ran[slot] += 1;
             assert_eq!(out, expected, "{kernel:?} {src:?}");
@@ -424,6 +520,8 @@ mod tests {
         }
       }
     }
+    assert!(ran[3] > 0);
+    #[cfg(target_arch = "aarch64")]
     assert!(ran[2] > 0);
   }
 }

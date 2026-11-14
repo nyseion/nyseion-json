@@ -153,12 +153,25 @@ impl<'indent> Pretty<'indent> {
     let mut block = [b' '; 128];
     while base < len {
       let n = (len - base).min(64);
-      if n < 64 {
-        block[..64].fill(b' ');
+      // A full block with 16 readable bytes past its end is classified and copied straight from
+      // the input, skipping the staging copy; only the last bytes of the input are staged.
+      // (Gap copies read up to 15 bytes past a gap that ends before byte 64 of the block, so
+      // `len - base >= 64 + 16` makes them stay inside `input`.)
+      let bytes: &[u8; 64];
+      let src: *const u8;
+      if len - base >= 64 + 16 {
+        // SAFETY: the 64 bytes at `base` are inside `input`.
+        bytes = unsafe { &*input.as_ptr().add(base).cast::<[u8; 64]>() };
+        src = input.as_ptr().wrapping_add(base);
+      } else {
+        if n < 64 {
+          block[..64].fill(b' ');
+        }
+        block[..n].copy_from_slice(&input[base..base + n]);
+        // SAFETY: the first 64 bytes of `block`.
+        bytes = unsafe { &*block.as_ptr().cast::<[u8; 64]>() };
+        src = block.as_ptr();
       }
-      block[..n].copy_from_slice(&input[base..base + n]);
-      // SAFETY: the first 64 bytes of `block`.
-      let bytes: &[u8; 64] = unsafe { &*block.as_ptr().cast::<[u8; 64]>() };
       let valid = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
       let masks = classify(bytes);
       let (escaped, overflow) = find_escaped(masks.backslash & valid, prev_escaped);
@@ -177,8 +190,8 @@ impl<'indent> Pretty<'indent> {
         if at > pos {
           flush_pending!();
           ensure!(at - pos + 16);
-          // `pos < at < 64`: the gap and 16 bytes past it are inside `block`.
-          put_chunks!(block.as_ptr().wrapping_add(pos), at - pos);
+          // `pos < at < 64`: the gap and 16 bytes past it are inside `input`/`block`.
+          put_chunks!(src.wrapping_add(pos), at - pos);
         }
         pos = at + 1;
         let byte = bytes[at];
@@ -218,7 +231,7 @@ impl<'indent> Pretty<'indent> {
         flush_pending!();
         ensure!(n - pos + 16);
         // `pos < n <= 64`: as above.
-        put_chunks!(block.as_ptr().wrapping_add(pos), n - pos);
+        put_chunks!(src.wrapping_add(pos), n - pos);
       }
       base += n;
     }
@@ -276,7 +289,7 @@ fn classify(bytes: &[u8; 64]) -> Masks {
     let splat = |byte: u8| _mm_set1_epi8(byte.cast_signed());
     let (quote, backslash, comma, colon) = (splat(b'"'), splat(b'\\'), splat(b','), splat(b':'));
     let (curly_open, curly_close, lower) = (splat(b'{'), splat(b'}'), splat(0x20));
-    let (space, newline, carriage, tab) = (splat(b' '), splat(b'\n'), splat(b'\r'), splat(b'\t'));
+    let (space, ctrl) = (splat(b' '), splat(0x1f));
     let mut masks = Masks { quote: 0, backslash: 0, structural: 0, space: 0 };
     for lane in 0..4 {
       let v = _mm_loadu_si128(bytes.as_ptr().add(lane * 16).cast());
@@ -289,28 +302,92 @@ fn classify(bytes: &[u8; 64]) -> Masks {
         _mm_or_si128(_mm_cmpeq_epi8(folded, curly_open), _mm_cmpeq_epi8(folded, curly_close)),
         _mm_or_si128(_mm_cmpeq_epi8(v, comma), _mm_cmpeq_epi8(v, colon)),
       ));
+      // Space, or any control byte: outside strings the only control bytes valid JSON has are
+      // `\t`, `\n` and `\r` (the rest of the mask is cleared by `!inside`), and min with 0x1f
+      // catches all four whitespace kinds in one compare.
       masks.space |= bits(_mm_or_si128(
-        _mm_or_si128(_mm_cmpeq_epi8(v, space), _mm_cmpeq_epi8(v, newline)),
-        _mm_or_si128(_mm_cmpeq_epi8(v, carriage), _mm_cmpeq_epi8(v, tab)),
+        _mm_cmpeq_epi8(v, space),
+        _mm_cmpeq_epi8(_mm_min_epu8(v, ctrl), v),
       ));
     }
     masks
   }
-  #[cfg(not(target_arch = "x86_64"))]
-  {
+  #[cfg(target_arch = "aarch64")]
+  // SAFETY: NEON is part of the aarch64 baseline; the four loads are inside `bytes`.
+  unsafe {
+    use crate::escape::movemask;
+    use core::arch::aarch64::*;
+    let (quote, backslash, comma, colon) =
+      (vdupq_n_u8(b'"'), vdupq_n_u8(b'\\'), vdupq_n_u8(b','), vdupq_n_u8(b':'));
+    let (curly_open, curly_close, lower) =
+      (vdupq_n_u8(b'{'), vdupq_n_u8(b'}'), vdupq_n_u8(0x20));
+    let (space, ctrl) = (vdupq_n_u8(b' '), vdupq_n_u8(0x1f));
     let mut masks = Masks { quote: 0, backslash: 0, structural: 0, space: 0 };
-    for (idx, &byte) in bytes.iter().enumerate() {
-      let bit = 1u64 << idx;
-      match byte {
-        b'"' => masks.quote |= bit,
-        b'\\' => masks.backslash |= bit,
-        b'{' | b'}' | b'[' | b']' | b',' | b':' => masks.structural |= bit,
-        b' ' | b'\n' | b'\r' | b'\t' => masks.space |= bit,
-        _ => {}
-      }
+    for lane in 0..4 {
+      // SAFETY: 16-byte loads at `lane * 16` are inside `bytes`.
+      let v = vld1q_u8(bytes.as_ptr().add(lane * 16));
+      let bits = |m: uint8x16_t| u64::from(movemask(m)) << (lane * 16);
+      masks.quote |= bits(vceqq_u8(v, quote));
+      masks.backslash |= bits(vceqq_u8(v, backslash));
+      // `[` and `]` are `{` and `}` without bit 0x20.
+      let folded = vorrq_u8(v, lower);
+      masks.structural |= bits(vorrq_u8(
+        vorrq_u8(vceqq_u8(folded, curly_open), vceqq_u8(folded, curly_close)),
+        vorrq_u8(vceqq_u8(v, comma), vceqq_u8(v, colon)),
+      ));
+      // Space, or any control byte, as above.
+      masks.space |= bits(vorrq_u8(
+        vceqq_u8(v, space),
+        vceqq_u8(vminq_u8(v, ctrl), v),
+      ));
     }
     masks
   }
+  #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+  {
+    classify_swar(bytes)
+  }
+}
+
+/// The classifier as one `u64` word at a time, for targets with no SIMD the pretty pass uses:
+/// the high bit of each byte says whether it is a member, and the hits are packed with the
+/// `GATHER` multiply. Matched against the SIMD classifier by a test wherever both compile.
+#[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[inline(always)]
+fn classify_swar(bytes: &[u8; 64]) -> Masks {
+  use crate::escape::{GATHER, HIGHS, ONES};
+  // The high bit of every byte of `y` that is zero, exactly: unlike the borrow trick
+  // `escape::word_hits` uses (whose borrows only climb, which is all it needs), this leaves no
+  // false hits on higher bytes, which a per-byte mask cannot tolerate. The low seven bits of a
+  // byte plus 0x7f cannot reach 0x100, so no carry crosses a byte boundary.
+  let zero = |y: u64| !(((y & !HIGHS).wrapping_add(ONES * 0x7f) & HIGHS) | (y & HIGHS)) & HIGHS;
+  // The bit `i` of every byte with its high bit set, packed into a byte.
+  let spread = |word: u64| ((word >> 7) & ONES).wrapping_mul(GATHER) >> 56;
+  let mut masks = Masks { quote: 0, backslash: 0, structural: 0, space: 0 };
+  for word in 0..8 {
+    let at = word * 8;
+    // SAFETY: eight bytes at `at < 64` in `bytes`.
+    let bits = unsafe { core::ptr::read_unaligned(bytes.as_ptr().add(at).cast::<u64>()) };
+    let quote = zero(bits ^ (ONES * u64::from(b'"')));
+    let backslash = zero(bits ^ (ONES * u64::from(b'\\')));
+    // `[` and `]` are `{` and `}` without bit 0x20, as above.
+    let folded = bits | (ONES * 0x20);
+    let structural = zero(folded ^ (ONES * u64::from(b'{')))
+      | zero(folded ^ (ONES * u64::from(b'}')))
+      | zero(bits ^ (ONES * u64::from(b',')))
+      | zero(bits ^ (ONES * u64::from(b':')));
+    // Space, or any control byte, as above: a byte below 0x20 borrows when 0x20 is subtracted.
+    // (The borrow can climb into a 0x20 byte and flag it too — it is space, so already a hit;
+    // it cannot flag anything else, because 0x21 or more does not borrow even with one coming
+    // in.) The high bytes are excluded by `!bits`.
+    let space = zero(bits ^ (ONES * u64::from(b' ')))
+      | (bits.wrapping_sub(ONES * 0x20) & !bits & HIGHS);
+    masks.quote |= u64::from(spread(quote)) << at;
+    masks.backslash |= u64::from(spread(backslash)) << at;
+    masks.structural |= u64::from(spread(structural)) << at;
+    masks.space |= u64::from(spread(space)) << at;
+  }
+  masks
 }
 
 /// Makes room for `additional` bytes after the first `len` (written) bytes of `out`: returns the
@@ -341,4 +418,27 @@ pub fn reformat(input: &[u8], indent: &[u8], out: &mut Vec<u8>) {
   let mut pretty = Pretty::new(indent);
   pretty.push(input, out);
   pretty.finish(out);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{Masks, classify, classify_swar};
+
+  /// The word-at-a-time classifier, which non-SIMD targets use, matches the SIMD one.
+  #[test]
+  fn swar_classify_matches_simd() {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+      state ^= state << 13;
+      state ^= state >> 7;
+      state ^= state << 17;
+      state
+    };
+    for _ in 0..20_000 {
+      let bytes: [u8; 64] = core::array::from_fn(|_| (next() >> 32) as u8);
+      let Masks { quote, backslash, structural, space } = classify(&bytes);
+      let Masks { quote: q, backslash: b, structural: s, space: w } = classify_swar(&bytes);
+      assert_eq!((quote, backslash, structural, space), (q, b, s, w), "{bytes:?}");
+    }
+  }
 }

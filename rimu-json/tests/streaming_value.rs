@@ -195,9 +195,19 @@ fn custom_indent() {
 }
 
 #[test]
+fn pretty_drops_control_bytes_outside_strings() {
+  // Invalid JSON, but the input contract only promises UTF-8-preserved output. The classifier
+  // treats every byte below 0x20 outside strings as whitespace, like the escape scanner does,
+  // so it is dropped like `\t` between tokens would be.
+  let mut out = Vec::new();
+  pretty::reformat(b"\x01a\x1f\x0b", b"  ", &mut out);
+  assert_eq!(out, b"a");
+}
+
+#[test]
 fn pretty_survives_malformed_input() {
   let mut rng = Rng(77);
-  let alphabet = b"{}[],:\"\\ a1\n";
+  let alphabet = b"{}[],:\"\\ a1\n\x01\x1f\x7f";
   for len in 0..200 {
     for _ in 0..50 {
       let input: Vec<u8> =

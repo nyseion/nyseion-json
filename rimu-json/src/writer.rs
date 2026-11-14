@@ -11,6 +11,11 @@ const PAIRS: &[u8; 200] = b"0001020304050607080910111213141516171819\
 6061626364656667686970717273747576777879\
 8081828384858687888990919293949596979899";
 
+/// Source bytes escaped per capacity check: the escaper runs on slices of this size, so a string
+/// reserves room for the slice's worst case, not its own. 32 KiB keeps the overshoot of a fully
+/// escaped chunk (six times 32 KiB) far under the sizes that matter while keeping the checks rare.
+const ESCAPE_CHUNK: usize = 32 * 1024;
+
 /// Appends JSON to a `Vec<u8>`.
 ///
 /// Every method checks the spare capacity once for its own worst case and then writes without
@@ -155,7 +160,6 @@ impl<'buf> JsonWriter<'buf> {
     }
   }
 
-  #[cfg(feature = "std")]
   /// A writer that hands every full buffer to `sink` instead of growing `buf`. `buf` gets at
   /// least `min_capacity` bytes; what is left in it at the end goes out with [`Self::flush_sink`].
   pub(crate) fn with_sink(
@@ -170,7 +174,6 @@ impl<'buf> JsonWriter<'buf> {
     writer
   }
 
-  #[cfg(feature = "std")]
   /// Hands everything still in the buffer to the sink.
   pub(crate) fn flush_sink(&mut self) {
     if let Some(sink) = self.sink.as_mut() {
@@ -284,13 +287,53 @@ impl<'buf> JsonWriter<'buf> {
   }
 
   /// A float in its shortest round-trip form as an `f32`; `null` when it is not finite.
+  ///
+  /// Whole values below 2^24 and values with at most two decimals below 10^5 (prices, ratings,
+  /// coordinates in degrees) take a fast path, as [`f64`](Self::f64) does: such a value is the
+  /// `f32` nearest to a decimal of at most six significant digits, so that decimal is its shortest
+  /// round-trip form. The cents are computed in `f64`, where every `f32` is exact.
   #[inline]
   pub fn f32(&mut self, value: f32) {
     if !value.is_finite() {
       return self.null();
     }
+    self.ensure(32);
+    // SAFETY: `len <= cap`.
+    let dst = unsafe { self.ptr.add(self.len) };
+    let magnitude = value.abs();
+    if magnitude < 16_777_216.0 {
+      let int = magnitude as u64;
+      if int as f32 == magnitude {
+        // SAFETY: 32 bytes of spare capacity were ensured; the longest output is 10 bytes.
+        unsafe {
+          let neg = usize::from(value.is_sign_negative());
+          *dst = b'-';
+          let out = neg.wrapping_add(write_u64(int, dst.add(neg)));
+          ptr::copy_nonoverlapping(b".0".as_ptr(), dst.add(out), 2);
+          self.len = self.len.wrapping_add(out).wrapping_add(2);
+        }
+        return;
+      }
+    }
+    if magnitude < 1e5 {
+      // `round` without `std`: below 10^7 < 2^53 the fraction of a double is exact.
+      let scaled = (magnitude as f64) * 100.0;
+      let whole = scaled as u64;
+      let cents = whole + u64::from(scaled - whole as f64 >= 0.5);
+      if cents as f32 / 100.0 == magnitude {
+        // SAFETY: 32 bytes of spare capacity were ensured; the longest output is 11 bytes.
+        let written = unsafe { write_cents(value.is_sign_negative(), cents, dst) };
+        self.len = self.len.wrapping_add(written);
+        return;
+      }
+    }
     let mut buffer = zmij::Buffer::new();
-    self.raw(buffer.format_finite(value));
+    let text = buffer.format_finite(value).as_bytes();
+    // SAFETY: 32 bytes of spare capacity were ensured; `zmij` writes at most 24.
+    unsafe {
+      copy_small(text.as_ptr(), dst, text.len());
+    }
+    self.len = self.len.wrapping_add(text.len());
   }
 
   /// A signed integer.
@@ -322,10 +365,20 @@ impl<'buf> JsonWriter<'buf> {
   /// A 128-bit signed integer.
   #[inline]
   pub fn i128(&mut self, value: i128) {
-    if value < 0 {
-      self.raw("-");
+    if let Ok(small) = i64::try_from(value) {
+      return self.i64(small);
     }
-    self.u128(value.unsigned_abs());
+    self.ensure(40);
+    // SAFETY: 40 bytes of spare capacity were ensured; the longest output is a sign and 39
+    // digits. The sign is stored unconditionally and the first digit overwrites it when the value
+    // is not negative.
+    unsafe {
+      let dst = self.ptr.add(self.len);
+      let neg = usize::from(value < 0);
+      *dst = b'-';
+      let written = neg.wrapping_add(write_u128(value.unsigned_abs(), dst.add(neg)));
+      self.len = self.len.wrapping_add(written);
+    }
   }
 
   /// A 128-bit unsigned integer.
@@ -334,15 +387,12 @@ impl<'buf> JsonWriter<'buf> {
     if let Ok(small) = u64::try_from(value) {
       return self.u64(small);
     }
-    let mut digits = [0u8; 39];
-    let mut at = digits.len();
-    let mut rest = value;
-    while rest > 0 {
-      at -= 1;
-      digits[at] = b'0' + (rest % 10) as u8;
-      rest /= 10;
+    self.ensure(39);
+    // SAFETY: 39 bytes of spare capacity were ensured; a `u128` has at most 39 digits.
+    unsafe {
+      let written = write_u128(value, self.ptr.add(self.len));
+      self.len = self.len.wrapping_add(written);
     }
-    self.raw_bytes(&digits[at..]);
   }
 
   /// Text that is already JSON: keys with their quotes and colon, punctuation, literals. It is not
@@ -386,9 +436,7 @@ impl<'buf> JsonWriter<'buf> {
       self.len = self.len.wrapping_add(src.len()).wrapping_add(2);
       return;
     }
-    self.raw("\"");
-    self.str_escaped(src);
-    self.raw("\"");
+    self.str_escaped(src, true);
   }
 
   /// The escaped contents of a string, without quotes.
@@ -405,7 +453,7 @@ impl<'buf> JsonWriter<'buf> {
       self.len = self.len.wrapping_add(src.len());
       return;
     }
-    self.str_escaped(src);
+    self.str_escaped(src, false);
   }
 
   #[inline(always)]
@@ -438,13 +486,49 @@ impl<'buf> JsonWriter<'buf> {
     self.cap = cap;
   }
 
+  /// Escapes `src` into the buffer in chunks of [`ESCAPE_CHUNK`] source bytes, so that a clean
+  /// string reserves room for what it actually writes instead of its worst case (six times its
+  /// length). With `quoted`, the opening quote rides the first chunk's capacity check and the
+  /// closing one the last.
   #[inline(never)]
-  fn str_escaped(&mut self, src: &[u8]) {
-    self.ensure(escape::bound(src.len()));
-    // SAFETY: `escape::bound` bytes of spare capacity were ensured.
-    unsafe {
-      let written = escape::escape(src, self.ptr.add(self.len));
-      self.len = self.len.wrapping_add(written);
+  fn str_escaped(&mut self, src: &[u8], quoted: bool) {
+    let mut at = 0;
+    while at < src.len() {
+      let end = (at + ESCAPE_CHUNK).min(src.len());
+      let chunk = &src[at..end];
+      let first = at == 0;
+      let last = end == src.len();
+      let quotes = usize::from(quoted) * (usize::from(first) + usize::from(last));
+      self.ensure(escape::bound(chunk.len()).wrapping_add(quotes));
+      // SAFETY: `escape::bound(chunk.len())` bytes of spare capacity, and `quotes` more, were
+      // ensured above.
+      unsafe {
+        let mut dst = self.ptr.add(self.len);
+        if quoted && first {
+          *dst = b'"';
+          dst = dst.add(1);
+          self.len = self.len.wrapping_add(1);
+        }
+        let written = escape::escape(chunk, dst);
+        self.len = self.len.wrapping_add(written);
+        if quoted && last {
+          // SAFETY: one more byte of spare capacity was ensured above.
+          *self.ptr.add(self.len) = b'"';
+          self.len = self.len.wrapping_add(1);
+        }
+      }
+      at = end;
+    }
+    // An empty string never reaches the slow path, but keep the quotes paired if it does.
+    if src.is_empty() && quoted {
+      self.ensure(2);
+      // SAFETY: two bytes of spare capacity were ensured above.
+      unsafe {
+        let dst = self.ptr.add(self.len);
+        *dst = b'"';
+        *dst.add(1) = b'"';
+        self.len = self.len.wrapping_add(2);
+      }
     }
   }
 }
@@ -515,6 +599,33 @@ unsafe fn write_pair(value: usize, dst: *mut u8) {
 unsafe fn write_u64_long(value: u64, dst: *mut u8) -> usize {
   let digits = value.checked_ilog10().map_or(1, |el| el.wrapping_add(1)) as usize;
   // SAFETY: `digits <= 20` bytes are written, right to left from `dst + digits`.
+  unsafe {
+    let mut end = dst.add(digits);
+    let mut rest = value;
+    while rest >= 100 {
+      let pair = (rest % 100) as usize;
+      rest /= 100;
+      end = end.sub(2);
+      write_pair(pair, end);
+    }
+    if rest >= 10 {
+      write_pair(rest as usize, end.sub(2));
+    } else {
+      *end.sub(1) = b'0'.wrapping_add(rest as u8);
+    }
+  }
+  digits
+}
+
+/// [`write_u64`] for any 128-bit value: two digits a step, right to left.
+///
+/// # Safety
+///
+/// `dst` is writable for 39 bytes.
+#[inline]
+unsafe fn write_u128(value: u128, dst: *mut u8) -> usize {
+  let digits = value.checked_ilog10().map_or(1, |el| el.wrapping_add(1)) as usize;
+  // SAFETY: `digits <= 39` bytes are written, right to left from `dst + digits`.
   unsafe {
     let mut end = dst.add(digits);
     let mut rest = value;

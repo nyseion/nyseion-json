@@ -256,6 +256,16 @@ fn main() {
     })
     .collect();
   let chars: Vec<char> = text.chars().collect();
+  // One long string (~1 MiB) with a few escapes: what the chunked escaping and the 64 KiB
+  // streaming chunks see.
+  let mut blob = String::with_capacity(1 << 20);
+  while blob.len() < 1 << 20 {
+    blob.push_str(&text);
+  }
+  blob.truncate(1 << 20);
+  for (i, b) in ['"', '\n', 'é', '😀'].into_iter().enumerate() {
+    blob.replace_range((i * 262_144)..(i * 262_144 + b.len_utf8()), &b.to_string());
+  }
   let extras = ['"', '\n', '\t', '\\', 'é', '日', '😀'];
   let posts: Vec<Post> = (0..5_000)
     .map(|i| {
@@ -313,6 +323,7 @@ fn main() {
   for n in [10, orders.len()] {
     bench(&format!("orders (enum, rename, skip_if) ×{n}"), &orders[..n], None);
   }
+  bench("long string 1 MiB", &blob, None);
 
   println!();
   println!(
@@ -326,6 +337,7 @@ fn main() {
   bench_modes("API items ×6000 (derive)", &items[..], true);
   bench_modes("orders ×2000 (derive)", &orders[..], true);
   bench_modes("text posts ×5000 (derive)", &posts[..], true);
+  bench_modes("long string 1 MiB", &blob, false);
   let items_value = serde_json::to_value(&items).unwrap();
   bench_modes("API items as serde_json::Value", &items_value, false);
   let orders_value = serde_json::to_value(&orders).unwrap();

@@ -46,6 +46,11 @@ pub use writer::{JsonBuffer, JsonWriter};
 
 use alloc::{string::String, vec::Vec};
 
+/// Buffer size of the streaming writers: each piece handed to a sink, and each `write_all` of
+/// [`to_writer`], is about this much. Large enough that a sink that is a file or socket pays one
+/// syscall per chunk, small enough that the per-thread buffer stays cache-friendly.
+const CHUNK: usize = 64 * 1024;
+
 /// Appends `value` as JSON to `buf`.
 #[inline]
 pub fn write_to<T: JsonWrite + ?Sized>(value: &T, buf: &mut Vec<u8>) {
@@ -62,11 +67,28 @@ pub fn to_vec<T: JsonWrite + ?Sized>(value: &T) -> Vec<u8> {
 
 /// Appends `value` as pretty JSON to `buf`, laid out as `serde_json::to_vec_pretty` lays it out
 /// (two-space indent). See [`pretty`] for other indents.
+///
+/// The compact form never exists in full: it is laid out chunk by chunk as it is written, so
+/// peak memory is `buf` plus one chunk, not `buf` plus the whole compact document.
 #[inline]
 pub fn write_pretty_to<T: JsonWrite + ?Sized>(value: &T, buf: &mut Vec<u8>) {
+  struct PrettyVecSink<'indent, 'buf> {
+    pretty: pretty::Pretty<'indent>,
+    out: &'buf mut Vec<u8>,
+  }
+  impl writer::Sink for PrettyVecSink<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) {
+      self.pretty.push(bytes, self.out);
+    }
+  }
   with_scratch(|scratch| {
-    write_to(value, scratch);
-    pretty::reformat(scratch, b"  ", buf);
+    let mut sink = PrettyVecSink { pretty: pretty::Pretty::new(b"  "), out: buf };
+    {
+      let mut w = JsonWriter::with_sink(scratch, &mut sink, CHUNK);
+      value.write_json(&mut w);
+      w.flush_sink();
+    }
+    sink.pretty.finish(sink.out);
   });
 }
 
@@ -112,12 +134,9 @@ fn with_scratch<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
 
 #[cfg(feature = "std")]
 mod io_impl {
-  use crate::{JsonWrite, JsonWriter, pretty::Pretty, with_scratch, writer::Sink};
+  use crate::{CHUNK, JsonWrite, JsonWriter, pretty::Pretty, with_scratch, writer::Sink};
   use alloc::vec::Vec;
   use std::io;
-
-  /// Buffer size of the streaming writers: each `write_all` gets about this much.
-  const CHUNK: usize = 16 * 1024;
 
   struct IoSink<W> {
     writer: W,
@@ -150,7 +169,7 @@ mod io_impl {
     }
   }
 
-  /// Writes `value` as JSON to `writer`, streaming: the output goes out in chunks of about 16 KiB
+  /// Writes `value` as JSON to `writer`, streaming: the output goes out in chunks of about 64 KiB
   /// from a reused per-thread buffer, so memory does not grow with the size of the value. Like
   /// `serde_json::to_writer`, it does not flush `writer`; wrapping it in a `BufWriter` is not
   /// needed.
