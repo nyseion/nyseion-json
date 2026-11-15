@@ -1,13 +1,14 @@
 [package]
-name = "rimu-json"
+name = "nyseion-json"
 description = "Fast JSON serialization: a derive that writes keys as pre-escaped literals, SIMD string escaping chosen at run time, output identical to serde_json."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 version.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rimu-json-derive = { path = "../rimu-json-derive", optional = true }
+nyseion-json-derive = { path = "../nyseion-json-derive", optional = true }
 serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
 zmij = { version = "1.0", default-features = false }
 
@@ -17,6 +18,6 @@ serde_json = { version = "1", features = ["std"] }
 
 [features]
 default = ["derive", "std"]
-derive = ["dep:rimu-json-derive"]
+derive = ["dep:nyseion-json-derive"]
 serde_json = ["dep:serde_json"]
 std = ["serde_json?/std"]

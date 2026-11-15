@@ -1,6 +1,6 @@
-//! Serialization throughput: serde_json and sonic-rs (derive) against rimu-json's derive and a
+//! Serialization throughput: serde_json and sonic-rs (derive) against nyseion-json's derive and a
 //! hand-written `JsonWriter`. Usage: bench <api.json> <text-file>
-use rimu_json::{JsonWrite, JsonWriter};
+use nyseion_json::{JsonWrite, JsonWriter};
 use serde::{Deserialize, Serialize};
 use std::{hint::black_box, time::Instant};
 
@@ -131,7 +131,7 @@ fn bench<T: Serialize + JsonWrite + ?Sized>(
 ) {
   let reference = serde_json::to_vec(value).unwrap();
   assert_eq!(sonic_rs::to_vec(value).unwrap(), reference, "sonic-rs differs on {name}");
-  assert_eq!(rimu_json::to_vec(value), reference, "rimu derive differs on {name}");
+  assert_eq!(nyseion_json::to_vec(value), reference, "nyseion derive differs on {name}");
   let len = reference.len();
   let mut v = Vec::with_capacity(len * 2);
   let serde = time(|| {
@@ -146,7 +146,7 @@ fn bench<T: Serialize + JsonWrite + ?Sized>(
   });
   let derive = time(|| {
     v.clear();
-    rimu_json::write_to(value, &mut v);
+    nyseion_json::write_to(value, &mut v);
     v.len()
   });
   let hand = hand.map(|f| {
@@ -176,7 +176,7 @@ fn bench<T: Serialize + JsonWrite + ?Sized>(
 fn bench_modes<T: Serialize + JsonWrite + ?Sized>(name: &str, value: &T, sonic: bool) {
   let compact = serde_json::to_vec(value).unwrap();
   let pretty = serde_json::to_vec_pretty(value).unwrap();
-  assert_eq!(rimu_json::to_vec_pretty(value), pretty, "pretty differs on {name}");
+  assert_eq!(nyseion_json::to_vec_pretty(value), pretty, "pretty differs on {name}");
   let mut v = Vec::with_capacity(pretty.len() * 2);
   let mbs = |len: usize, ns: f64| len as f64 / ns * 1e3;
   let serde_vec = time(|| {
@@ -184,17 +184,17 @@ fn bench_modes<T: Serialize + JsonWrite + ?Sized>(name: &str, value: &T, sonic: 
     serde_json::to_writer(&mut v, value).unwrap();
     v.len()
   });
-  let rimu_vec = time(|| {
+  let nyseion_vec = time(|| {
     v.clear();
-    rimu_json::write_to(value, &mut v);
+    nyseion_json::write_to(value, &mut v);
     v.len()
   });
   let serde_io = time(|| {
     serde_json::to_writer(std::io::BufWriter::new(std::io::sink()), value).unwrap();
     0
   });
-  let rimu_io = time(|| {
-    rimu_json::to_writer(std::io::sink(), value).unwrap();
+  let nyseion_io = time(|| {
+    nyseion_json::to_writer(std::io::sink(), value).unwrap();
     0
   });
   let serde_pretty = time(|| {
@@ -210,35 +210,35 @@ fn bench_modes<T: Serialize + JsonWrite + ?Sized>(name: &str, value: &T, sonic: 
       v.len()
     })
   });
-  let rimu_pretty = time(|| {
+  let nyseion_pretty = time(|| {
     v.clear();
-    rimu_json::write_pretty_to(value, &mut v);
+    nyseion_json::write_pretty_to(value, &mut v);
     v.len()
   });
   let serde_pretty_io = time(|| {
     serde_json::to_writer_pretty(std::io::BufWriter::new(std::io::sink()), value).unwrap();
     0
   });
-  let rimu_pretty_io = time(|| {
-    rimu_json::to_writer_pretty(std::io::sink(), value).unwrap();
+  let nyseion_pretty_io = time(|| {
+    nyseion_json::to_writer_pretty(std::io::sink(), value).unwrap();
     0
   });
   let (c, p) = (compact.len(), pretty.len());
   println!(
     "| {name} | {:.0} / **{:.0}** ({:.1}×) | {:.0} / **{:.0}** ({:.1}×) | {:.0} / {} / **{:.0}** ({:.1}×) | {:.0} / **{:.0}** ({:.1}×) |",
     mbs(c, serde_vec),
-    mbs(c, rimu_vec),
-    serde_vec / rimu_vec,
+    mbs(c, nyseion_vec),
+    serde_vec / nyseion_vec,
     mbs(c, serde_io),
-    mbs(c, rimu_io),
-    serde_io / rimu_io,
+    mbs(c, nyseion_io),
+    serde_io / nyseion_io,
     mbs(p, serde_pretty),
     sonic_pretty.map_or("–".into(), |ns| format!("{:.0}", mbs(p, ns))),
-    mbs(p, rimu_pretty),
-    serde_pretty / rimu_pretty,
+    mbs(p, nyseion_pretty),
+    serde_pretty / nyseion_pretty,
     mbs(p, serde_pretty_io),
-    mbs(p, rimu_pretty_io),
-    serde_pretty_io / rimu_pretty_io,
+    mbs(p, nyseion_pretty_io),
+    serde_pretty_io / nyseion_pretty_io,
   );
 }
 
@@ -304,10 +304,10 @@ fn main() {
         .collect(),
     })
     .collect();
-  println!("escape kernel: {:?}", rimu_json::kernel());
+  println!("escape kernel: {:?}", nyseion_json::kernel());
   println!();
   println!(
-    "| data | output | serde_json MB/s | sonic-rs MB/s | rimu derive MB/s | rimu hand MB/s | derive vs serde | derive vs sonic |"
+    "| data | output | serde_json MB/s | sonic-rs MB/s | nyseion derive MB/s | nyseion hand MB/s | derive vs serde | derive vs sonic |"
   );
   println!("|---|---|---|---|---|---|---|---|");
   for n in [10, items.len()] {
@@ -327,11 +327,11 @@ fn main() {
 
   println!();
   println!(
-    "MB/s, serde_json / rimu (sonic-rs where it applies). Pretty MB/s are of the pretty output. io::Write: serde_json through a BufWriter (as its docs advise), rimu-json directly; both over io::sink()."
+    "MB/s, serde_json / nyseion (sonic-rs where it applies). Pretty MB/s are of the pretty output. io::Write: serde_json through a BufWriter (as its docs advise), nyseion-json directly; both over io::sink()."
   );
   println!();
   println!(
-    "| data | compact → Vec | compact → io::Write | pretty → Vec (serde / sonic / rimu) | pretty → io::Write |"
+    "| data | compact → Vec | compact → io::Write | pretty → Vec (serde / sonic / nyseion) | pretty → io::Write |"
   );
   println!("|---|---|---|---|---|");
   bench_modes("API items ×6000 (derive)", &items[..], true);

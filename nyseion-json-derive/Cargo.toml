@@ -1,8 +1,9 @@
 [package]
-name = "rimu-json-derive"
-description = "Derive macro for rimu-json."
+name = "nyseion-json-derive"
+description = "Derive macro for nyseion-json."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 version.workspace = true
 rust-version.workspace = true
 

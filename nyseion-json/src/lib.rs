@@ -10,7 +10,7 @@
 //!   same bytes from either. Attributes whose output it cannot reproduce are compile errors.
 //!
 //! ```
-//! use rimu_json::JsonWrite;
+//! use nyseion_json::JsonWrite;
 //!
 //! #[derive(JsonWrite)]
 //! struct Item<'a> {
@@ -23,7 +23,7 @@
 //!
 //! let item = Item { id: 7, name: "Widget \"Pro\"", price: Some(19.99), tags: vec!["sale"] };
 //! assert_eq!(
-//!   rimu_json::to_string(&item),
+//!   nyseion_json::to_string(&item),
 //!   r#"{"id":7,"name":"Widget \"Pro\"","price":19.99,"tags":["sale"]}"#
 //! );
 //! ```
@@ -41,7 +41,7 @@ mod writer;
 pub use escape::{Kernel, kernel};
 pub use impls::{JsonKey, JsonWrite};
 #[cfg(feature = "derive")]
-pub use rimu_json_derive::JsonWrite;
+pub use nyseion_json_derive::JsonWrite;
 pub use writer::{JsonBuffer, JsonWriter};
 
 use alloc::{string::String, vec::Vec};
@@ -255,24 +255,24 @@ pub mod __private {
 /// Attributes whose output the derive does not reproduce are rejected at compile time:
 ///
 /// ```compile_fail
-/// #[derive(rimu_json::JsonWrite)]
+/// #[derive(nyseion_json::JsonWrite)]
 /// struct A { #[serde(flatten)] b: std::collections::BTreeMap<String, u8> }
 /// ```
 ///
 /// ```compile_fail
-/// #[derive(rimu_json::JsonWrite)]
+/// #[derive(nyseion_json::JsonWrite)]
 /// #[serde(tag = "type")]
 /// enum E { A { x: u8 } }
 /// ```
 ///
 /// ```compile_fail
-/// #[derive(rimu_json::JsonWrite)]
+/// #[derive(nyseion_json::JsonWrite)]
 /// #[serde(untagged)]
 /// enum E { A(u8) }
 /// ```
 ///
 /// ```compile_fail
-/// #[derive(rimu_json::JsonWrite)]
+/// #[derive(nyseion_json::JsonWrite)]
 /// struct A { #[serde(serialize_with = "f")] b: u8 }
 /// ```
 ///
@@ -281,10 +281,10 @@ pub mod __private {
 ///
 /// ```compile_fail
 /// struct String(u8);
-/// impl rimu_json::JsonWrite for String {
-///   fn write_json(&self, w: &mut rimu_json::JsonWriter<'_>) { w.u64(self.0.into()) }
+/// impl nyseion_json::JsonWrite for String {
+///   fn write_json(&self, w: &mut nyseion_json::JsonWriter<'_>) { w.u64(self.0.into()) }
 /// }
-/// #[derive(rimu_json::JsonWrite)]
+/// #[derive(nyseion_json::JsonWrite)]
 /// struct A { b: String }
 /// ```
 #[cfg(doctest)]

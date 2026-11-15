@@ -19,7 +19,7 @@ dependencies = [
 name = "bench"
 version = "0.1.0"
 dependencies = [
- "rimu-json",
+ "nyseion-json",
  "serde",
  "serde_json",
  "sonic-rs",
@@ -163,6 +163,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nyseion-json"
+version = "0.1.0"
+dependencies = [
+ "nyseion-json-derive",
+ "serde",
+ "serde_json",
+ "zmij",
+]
+
+[[package]]
+name = "nyseion-json-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -252,25 +271,6 @@ name = "rend"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "663ba70707f96e871406fe10d68128412e619b06d1d47cb91c3a4c6501176240"
-
-[[package]]
-name = "rimu-json"
-version = "0.1.0"
-dependencies = [
- "rimu-json-derive",
- "serde",
- "serde_json",
- "zmij",
-]
-
-[[package]]
-name = "rimu-json-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "rkyv"

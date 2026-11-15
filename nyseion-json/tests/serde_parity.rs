@@ -1,6 +1,6 @@
-//! Every value is written by `rimu_json` and by `serde_json` and the bytes must be equal.
+//! Every value is written by `nyseion_json` and by `serde_json` and the bytes must be equal.
 
-use rimu_json::{JsonWrite, JsonWriter};
+use nyseion_json::{JsonWrite, JsonWriter};
 use serde::Serialize;
 use std::{
   borrow::Cow,
@@ -12,20 +12,20 @@ use std::{
 #[track_caller]
 fn same<T: Serialize + JsonWrite + ?Sized>(value: &T) {
   let expected = serde_json::to_string(value).unwrap();
-  assert_eq!(rimu_json::to_string(value), expected);
+  assert_eq!(nyseion_json::to_string(value), expected);
   // Appending keeps what was there.
   let mut buf = b"x".to_vec();
-  rimu_json::write_to(value, &mut buf);
+  nyseion_json::write_to(value, &mut buf);
   assert_eq!(&buf[1..], expected.as_bytes());
   // Streaming to an `io::Write`.
   let mut out = Vec::new();
-  rimu_json::to_writer(&mut out, value).unwrap();
+  nyseion_json::to_writer(&mut out, value).unwrap();
   assert_eq!(out, expected.as_bytes());
   // Pretty, in memory and streaming.
   let pretty = serde_json::to_string_pretty(value).unwrap();
-  assert_eq!(rimu_json::to_string_pretty(value), pretty);
+  assert_eq!(nyseion_json::to_string_pretty(value), pretty);
   let mut out = Vec::new();
-  rimu_json::to_writer_pretty(&mut out, value).unwrap();
+  nyseion_json::to_writer_pretty(&mut out, value).unwrap();
   assert_eq!(out, pretty.as_bytes());
 }
 
@@ -435,7 +435,7 @@ fn long_strings_across_escape_chunks() {
 #[test]
 fn to_vec_of_a_long_clean_string_does_not_reserve_six_times_the_output() {
   let text = "x".repeat(1 << 20);
-  let out = rimu_json::to_vec(text.as_str());
+  let out = nyseion_json::to_vec(text.as_str());
   assert_eq!(out.len(), text.len() + 2);
   assert!(
     out.capacity() <= out.len() * 2 + 64,

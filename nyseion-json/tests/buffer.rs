@@ -1,6 +1,6 @@
 //! `JsonWriter` over a buffer that is not a `Vec<u8>`, through `JsonBuffer`.
 
-use rimu_json::{JsonBuffer, JsonWrite, JsonWriter};
+use nyseion_json::{JsonBuffer, JsonWrite, JsonWriter};
 use std::alloc::{Layout, alloc, dealloc, realloc};
 
 /// A growable byte buffer on its own raw allocation.
@@ -101,7 +101,7 @@ fn writer_over_a_custom_buffer_matches_vec() {
     let mut w = JsonWriter::new(&mut raw);
     items.write_json(&mut w);
   }
-  assert_eq!(raw.bytes(), rimu_json::to_vec(&items).as_slice());
+  assert_eq!(raw.bytes(), nyseion_json::to_vec(&items).as_slice());
 }
 
 #[test]

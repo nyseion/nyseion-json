@@ -8,7 +8,7 @@ fn main() {
   let n = 300;
   for _ in 0..n {
     out.clear();
-    rimu_json::pretty::reformat(black_box(&compact), b"  ", &mut out);
+    nyseion_json::pretty::reformat(black_box(&compact), b"  ", &mut out);
   }
   let ns = t.elapsed().as_nanos() as f64 / n as f64;
   println!(

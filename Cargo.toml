@@ -1,10 +1,11 @@
 [workspace]
-members = ["rimu-json", "rimu-json-derive", "bench"]
+members = ["nyseion-json", "nyseion-json-derive", "bench"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/nyseion/nyseion-json"
 version = "0.1.0"
 rust-version = "1.89"
 

@@ -1,4 +1,4 @@
-//! `#[derive(JsonWrite)]` for `rimu-json`.
+//! `#[derive(JsonWrite)]` for `nyseion-json`.
 //!
 //! The generated code writes every constant piece of the output (braces, keys with their quotes
 //! and colons, the commas between fields, the quotes around `String` and `&str` fields) as one
@@ -282,10 +282,10 @@ impl Emitter {
   fn value(&mut self, expr: &TokenStream2, ty: &Type) {
     if is_str_like(ty) {
       self.lit("\"");
-      self.stmt(quote!(__w.str_contents(::rimu_json::__private::AsJsonStr::as_json_str(#expr));));
+      self.stmt(quote!(__w.str_contents(::nyseion_json::__private::AsJsonStr::as_json_str(#expr));));
       self.lit("\"");
     } else {
-      self.stmt(quote!(::rimu_json::JsonWrite::write_json(#expr, __w);));
+      self.stmt(quote!(::nyseion_json::JsonWrite::write_json(#expr, __w);));
     }
   }
 }
@@ -567,15 +567,15 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     .collect();
   let where_clause = generics.make_where_clause();
   for ident in bounded {
-    where_clause.predicates.push(parse_quote!(#ident: ::rimu_json::JsonWrite));
+    where_clause.predicates.push(parse_quote!(#ident: ::nyseion_json::JsonWrite));
   }
   let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
   Ok(quote! {
     #[automatically_derived]
-    impl #impl_generics ::rimu_json::JsonWrite for #name #ty_generics #where_clause {
+    impl #impl_generics ::nyseion_json::JsonWrite for #name #ty_generics #where_clause {
       #[inline]
       #[allow(unused_assignments, unused_mut, unused_variables, clippy::all)]
-      fn write_json(&self, __w: &mut ::rimu_json::JsonWriter<'_>) {
+      fn write_json(&self, __w: &mut ::nyseion_json::JsonWriter<'_>) {
         #body
       }
     }

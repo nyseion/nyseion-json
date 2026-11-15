@@ -1,6 +1,6 @@
 escape kernel: Avx2
 
-| data | output | serde_json MB/s | sonic-rs MB/s | rimu derive MB/s | rimu hand MB/s | derive vs serde | derive vs sonic |
+| data | output | serde_json MB/s | sonic-rs MB/s | nyseion derive MB/s | nyseion hand MB/s | derive vs serde | derive vs sonic |
 |---|---|---|---|---|---|---|---|
 | API items ×10 | 1613 B | 609 | 599 | **2241** | 2404 | 3.68× | 3.74× |
 | API items ×6000 | 980 KB | 463 | 606 | **1978** | 1990 | 4.28× | 3.27× |

@@ -1,12 +1,12 @@
-# rimu-json
+# nyseion-json
 
 Fast JSON serialization for Rust, with output byte-identical to `serde_json`.
 
-Part of the rimu family of performance crates, alongside the [rimu-ws](https://github.com/vincentmele/rimu-ws)
-web server. Not affiliated with the [Rimu template language](https://rimu.dev) (`rimu` on crates.io).
+Part of the nyseion family of performance crates, alongside the [nyseion-ws](https://github.com/vincentmele/nyseion-ws)
+web server.
 
 ```rust
-use rimu_json::JsonWrite;
+use nyseion_json::JsonWrite;
 
 #[derive(serde::Serialize, JsonWrite)]
 #[serde(rename_all = "camelCase")]
@@ -18,13 +18,13 @@ struct Order<'a> {
   total: f64,
 }
 
-let json: String = rimu_json::to_string(&order);   // same bytes as serde_json::to_string(&order)
-rimu_json::write_to(&order, &mut buf);             // appends to a reused Vec<u8>
-rimu_json::to_writer(&mut file, &order)?;          // streams to any io::Write
-let pretty = rimu_json::to_string_pretty(&order);  // same bytes as serde_json::to_string_pretty
-rimu_json::to_writer_pretty(&mut file, &order)?;   // streaming, pretty
+let json: String = nyseion_json::to_string(&order);   // same bytes as serde_json::to_string(&order)
+nyseion_json::write_to(&order, &mut buf);             // appends to a reused Vec<u8>
+nyseion_json::to_writer(&mut file, &order)?;          // streams to any io::Write
+let pretty = nyseion_json::to_string_pretty(&order);  // same bytes as serde_json::to_string_pretty
+nyseion_json::to_writer_pretty(&mut file, &order)?;   // streaming, pretty
 let value: serde_json::Value = /* ... */;
-rimu_json::to_string(&value);                      // `serde_json` feature
+nyseion_json::to_string(&value);                      // `serde_json` feature
 ```
 
 ## API
@@ -72,8 +72,8 @@ rimu_json::to_string(&value);                      // `serde_json` feature
 
 One build serves every x86-64 CPU. Without `-C target-cpu=...`, the crate reads `cpuid` once
 (no `std` needed), caches the answer in an atomic, and runs the AVX2 or SSE2 kernel. With AVX2
-enabled at compile time it calls the AVX2 kernel directly. `rimu_json::kernel()` reports which one
-runs; `RIMU_JSON_NO_AVX2=1` forces SSE2 (with `std`) for measurement. Other targets use SWAR.
+enabled at compile time it calls the AVX2 kernel directly. `nyseion_json::kernel()` reports which one
+runs; `NYSEION_JSON_NO_AVX2=1` forces SSE2 (with `std`) for measurement. Other targets use SWAR.
 
 ## serde compatibility
 
@@ -92,7 +92,7 @@ collections, 128-bit integers, 600 k floats and 9 k random strings, on each esca
 x86-64 build (no `target-cpu`), runtime-selected AVX2. The machine was shared and loaded, so
 treat ±10 % as noise. Every output was checked equal to `serde_json`'s.
 
-| data | output | serde_json MB/s | sonic-rs MB/s | rimu derive MB/s | rimu hand MB/s | derive vs serde | derive vs sonic |
+| data | output | serde_json MB/s | sonic-rs MB/s | nyseion derive MB/s | nyseion hand MB/s | derive vs serde | derive vs sonic |
 |---|---|---|---|---|---|---|---|
 | API items ×10 | 1613 B | 609 | 599 | **2241** | 2404 | 3.68× | 3.74× |
 | API items ×6000 | 980 KB | 463 | 606 | **1978** | 1990 | 4.28× | 3.27× |
@@ -105,11 +105,11 @@ treat ±10 % as noise. Every output was checked equal to `serde_json`'s.
 
 ### Pretty, streaming and `serde_json::Value`
 
-Same machine and caveats. MB/s, serde_json / rimu-json (sonic-rs where it applies); pretty MB/s
+Same machine and caveats. MB/s, serde_json / nyseion-json (sonic-rs where it applies); pretty MB/s
 are of the pretty output. For `io::Write`, serde_json goes through a `BufWriter` (as its docs
-advise) and rimu-json writes directly; both into `io::sink()`.
+advise) and nyseion-json writes directly; both into `io::sink()`.
 
-| data | compact → Vec | compact → io::Write | pretty → Vec (serde / sonic / rimu) | pretty → io::Write |
+| data | compact → Vec | compact → io::Write | pretty → Vec (serde / sonic / nyseion) | pretty → io::Write |
 |---|---|---|---|---|
 | API items ×6000 (derive) | 552 / **1590** (2.9×) | 415 / **2332** (5.6×) | 641 / 575 / **784** (1.2×) | 530 / **711** (1.3×) |
 | orders ×2000 (derive) | 622 / **1710** (2.8×) | 657 / **1541** (2.3×) | 593 / 682 / **1100** (1.9×) | 594 / **1058** (1.8×) |
@@ -129,7 +129,7 @@ inside `write_json`, so this rarely matters.
 
 ## Provenance and license
 
-`JsonWriter` began in [rimu-ws](https://github.com/vincentmele/rimu-ws), where it served
+`JsonWriter` began in [nyseion-ws](https://github.com/vincentmele/nyseion-ws), where it served
 HttpArena's JSON profiles; it was written there by this crate's author, not taken from wtx.
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

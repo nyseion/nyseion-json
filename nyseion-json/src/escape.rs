@@ -280,7 +280,7 @@ mod x86 {
   /// 0: not checked yet, 1: no AVX2, 2: AVX2.
   static LEVEL: AtomicU8 = AtomicU8::new(0);
 
-  /// Whether the kernels may use AVX2: the CPU has it and, with `std`, the `RIMU_JSON_NO_AVX2`
+  /// Whether the kernels may use AVX2: the CPU has it and, with `std`, the `NYSEION_JSON_NO_AVX2`
   /// environment variable is not set (to measure the SSE2 kernel on an AVX2 machine). Checked once.
   #[inline(always)]
   #[allow(dead_code, reason = "unused when AVX2 is enabled at compile time")]
@@ -296,7 +296,7 @@ mod x86 {
   #[allow(dead_code, reason = "unused when AVX2 is enabled at compile time")]
   fn detect() -> bool {
     #[cfg(feature = "std")]
-    let allowed = std::env::var_os("RIMU_JSON_NO_AVX2").is_none();
+    let allowed = std::env::var_os("NYSEION_JSON_NO_AVX2").is_none();
     #[cfg(not(feature = "std"))]
     let allowed = true;
     let avx2 = allowed && cpu_has_avx2();

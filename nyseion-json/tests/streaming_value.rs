@@ -1,7 +1,7 @@
 //! `serde_json::Value`, streaming across buffer boundaries, pretty layout in chunks, I/O errors.
 #![cfg(feature = "serde_json")]
 
-use rimu_json::{JsonWrite, JsonWriter, pretty};
+use nyseion_json::{JsonWrite, JsonWriter, pretty};
 use serde::Serialize;
 use serde_json::{Map, Number, Value, json};
 use std::io;
@@ -48,10 +48,10 @@ fn values_match_serde_json() {
   for _ in 0..5_000 {
     let value = random_value(&mut rng, 4);
     let compact = serde_json::to_string(&value).unwrap();
-    assert_eq!(rimu_json::to_string(&value), compact);
-    assert_eq!(rimu_json::to_string_pretty(&value), serde_json::to_string_pretty(&value).unwrap());
+    assert_eq!(nyseion_json::to_string(&value), compact);
+    assert_eq!(nyseion_json::to_string_pretty(&value), serde_json::to_string_pretty(&value).unwrap());
     if let Value::Object(map) = &value {
-      assert_eq!(rimu_json::to_string(map), compact);
+      assert_eq!(nyseion_json::to_string(map), compact);
     }
   }
   for value in [
@@ -64,7 +64,7 @@ fn values_match_serde_json() {
     json!({}),
     json!([]),
   ] {
-    assert_eq!(rimu_json::to_string(&value), serde_json::to_string(&value).unwrap());
+    assert_eq!(nyseion_json::to_string(&value), serde_json::to_string(&value).unwrap());
   }
 }
 
@@ -91,21 +91,21 @@ impl JsonWrite for Commas {
 fn streaming_matches_in_memory_across_buffers() {
   for count in [0, 1, 2, 1_000, 10_000, 100_000] {
     let value = Commas(count);
-    let expected = rimu_json::to_vec(&value);
+    let expected = nyseion_json::to_vec(&value);
     let mut out = Vec::new();
-    rimu_json::to_writer(&mut out, &value).unwrap();
+    nyseion_json::to_writer(&mut out, &value).unwrap();
     assert_eq!(out, expected, "{count}");
     let mut out = Vec::new();
-    rimu_json::to_writer_pretty(&mut out, &value).unwrap();
-    assert_eq!(out, rimu_json::to_vec_pretty(&value), "{count}");
+    nyseion_json::to_writer_pretty(&mut out, &value).unwrap();
+    assert_eq!(out, nyseion_json::to_vec_pretty(&value), "{count}");
   }
   let mut rng = Rng(5);
   let big: Vec<Value> = (0..3_000).map(|_| random_value(&mut rng, 4)).collect();
   let mut out = Vec::new();
-  rimu_json::to_writer(&mut out, &big).unwrap();
+  nyseion_json::to_writer(&mut out, &big).unwrap();
   assert_eq!(out, serde_json::to_vec(&big).unwrap());
   let mut out = Vec::new();
-  rimu_json::to_writer_pretty(&mut out, &big).unwrap();
+  nyseion_json::to_writer_pretty(&mut out, &big).unwrap();
   assert_eq!(out, serde_json::to_vec_pretty(&big).unwrap());
 }
 
@@ -132,12 +132,12 @@ impl io::Write for Trickle {
 fn short_writes_and_errors() {
   let value = Commas(20_000);
   let mut ok = Trickle { out: Vec::new(), limit: usize::MAX };
-  rimu_json::to_writer(&mut ok, &value).unwrap();
-  assert_eq!(ok.out, rimu_json::to_vec(&value));
-  let err = rimu_json::to_writer(Trickle { out: Vec::new(), limit: 50_000 }, &value).unwrap_err();
+  nyseion_json::to_writer(&mut ok, &value).unwrap();
+  assert_eq!(ok.out, nyseion_json::to_vec(&value));
+  let err = nyseion_json::to_writer(Trickle { out: Vec::new(), limit: 50_000 }, &value).unwrap_err();
   assert_eq!(err.to_string(), "full");
   let err =
-    rimu_json::to_writer_pretty(Trickle { out: Vec::new(), limit: 50_000 }, &value).unwrap_err();
+    nyseion_json::to_writer_pretty(Trickle { out: Vec::new(), limit: 50_000 }, &value).unwrap_err();
   assert_eq!(err.to_string(), "full");
 }
 
@@ -190,7 +190,7 @@ fn custom_indent() {
   );
   value.serialize(&mut ser).unwrap();
   let mut out = Vec::new();
-  rimu_json::to_writer_with_indent(&mut out, &value, b"\t").unwrap();
+  nyseion_json::to_writer_with_indent(&mut out, &value, b"\t").unwrap();
   assert_eq!(out, expected);
 }
 
